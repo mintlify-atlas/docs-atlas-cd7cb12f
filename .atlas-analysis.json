@@ -1,0 +1,116 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "HTTPower",
+  "projectDescription": "A production-ready Elixir HTTP client library with built-in reliability patterns including circuit breaker, rate limiting, PCI-compliant logging, and smart retries.",
+  "theme": "sequoia",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["introduction", "quickstart", "adapters"]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/retries",
+              "features/rate-limiting",
+              "features/circuit-breaker",
+              "features/deduplication",
+              "features/pci-logging",
+              "features/telemetry"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/profiles",
+              "configuration/test-mode"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/production-deployment",
+              "guides/migrating-from-tesla",
+              "guides/migrating-from-req"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api-reference/httpower",
+              "api-reference/response",
+              "api-reference/error"
+            ]
+          },
+          {
+            "group": "Middleware",
+            "pages": [
+              "api-reference/circuit-breaker",
+              "api-reference/rate-limiter",
+              "api-reference/dedup"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api-reference/logger",
+              "api-reference/profiles",
+              "api-reference/rate-limit-headers",
+              "api-reference/test-helpers"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Circuit breaker with closed/open/half-open state machine",
+    "Token bucket rate limiting with :wait and :error strategies",
+    "PCI-compliant logging with automatic sensitive data sanitization",
+    "Smart retries with exponential backoff and jitter",
+    "In-flight request deduplication to prevent double-clicks and race conditions",
+    "Multi-adapter support: Finch (default), Req, and Tesla",
+    "Comprehensive telemetry events for Prometheus, OpenTelemetry, and LiveDashboard",
+    "Pre-built configuration profiles for payment processing, high-volume APIs, and microservices",
+    "Test mode blocking with adapter-agnostic mock helpers",
+    "Never raises exceptions — always returns result tuples"
+  ],
+  "publicApiSurface": [
+    "HTTPower.new/1",
+    "HTTPower.get/2,3",
+    "HTTPower.post/2,3",
+    "HTTPower.put/2,3",
+    "HTTPower.delete/2,3",
+    "HTTPower.patch/2,3",
+    "HTTPower.head/2,3",
+    "HTTPower.options/2,3",
+    "HTTPower.test_mode?/0",
+    "HTTPower.Logger.attach/0,1",
+    "HTTPower.Logger.detach/0",
+    "HTTPower.Middleware.CircuitBreaker.get_state/1",
+    "HTTPower.Middleware.CircuitBreaker.open_circuit/1",
+    "HTTPower.Middleware.CircuitBreaker.close_circuit/1",
+    "HTTPower.Middleware.CircuitBreaker.reset_circuit/1",
+    "HTTPower.Middleware.RateLimiter.update_from_headers/2",
+    "HTTPower.Middleware.RateLimiter.get_info/1",
+    "HTTPower.RateLimitHeaders.parse/1",
+    "HTTPower.Profiles.get/1",
+    "HTTPower.Profiles.list/0",
+    "HTTPower.Test.setup/0",
+    "HTTPower.Test.stub/1",
+    "HTTPower.Test.json/2"
+  ]
+}
