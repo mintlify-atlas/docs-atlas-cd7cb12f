@@ -1,0 +1,282 @@
+---
+title: "Adapters"
+description: "HTTPower supports Finch, Req, and Tesla HTTP clients. Learn how to configure and choose the right adapter."
+---
+
+HTTPower's production features — circuit breaker, rate limiting, PCI-compliant logging, and smart retries — work identically across all adapters. The adapter only affects the underlying HTTP transport layer.
+
+## Comparison
+
+| Adapter | Best for | JSON handling | Connection pooling | Notes |
+|---|---|---|---|---|
+| **Finch** (default) | High-performance production workloads | Manual (via Jason) | Explicit, configurable | Built on Mint + NimblePool |
+| **Req** | Batteries-included convenience | Automatic | Via Finch under the hood | Passes most Req options through |
+| **Tesla** | Existing Tesla applications | Via middleware | Depends on Tesla adapter | Preserves your middleware stack |
+
+<Note>
+If multiple adapters are installed, HTTPower uses Finch by default. You can override this globally, per-client, or per-request.
+</Note>
+
+## Setup
+
+<Tabs>
+  <Tab title="Finch">
+
+### Why Finch is the default
+
+Finch is a performance-focused HTTP client built on [Mint](https://github.com/elixir-mint/mint) and [NimblePool](https://github.com/dashbitco/nimble_pool). It gives you explicit control over connection pool sizes and counts, making it well-suited for high-throughput production services.
+
+### Add the dependency
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:finch, ">= 0.19.0"}
+  ]
+end
+```
+
+### Start the supervisor
+
+Add `HTTPower.Finch` to your supervision tree:
+
+```elixir lib/my_app/application.ex
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    children = [
+      {Finch, name: HTTPower.Finch}
+    ]
+
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+### Configure connection pools (optional)
+
+```elixir config/config.exs
+config :httpower, :finch_pools,
+  default: [
+    size: 10,
+    count: System.schedulers_online(),
+    conn_opts: [
+      timeout: 5_000
+    ]
+  ]
+```
+
+### Usage
+
+Finch is the default adapter. No extra configuration is needed:
+
+```elixir
+# Uses Finch automatically
+{:ok, response} = HTTPower.get("https://api.example.com/users")
+```
+
+To select Finch explicitly:
+
+```elixir
+HTTPower.get("https://api.example.com/users",
+  adapter: HTTPower.Adapter.Finch
+)
+```
+
+<Tip>
+The Finch adapter automatically decodes JSON response bodies using Jason. Non-JSON bodies are returned as strings.
+</Tip>
+
+  </Tab>
+  <Tab title="Req">
+
+### Req overview
+
+Req is a batteries-included HTTP client with automatic JSON encoding/decoding, response decompression, and built-in test helpers via `Req.Test`.
+
+<Warning>
+HTTPower disables Req's built-in retry logic (`retry: false`) to avoid double-retrying. HTTPower's own retry logic — with exponential backoff and jitter — is used instead.
+</Warning>
+
+### Add the dependency
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:req, ">= 0.4.0"}
+  ]
+end
+```
+
+### Usage
+
+```elixir
+# Select the Req adapter explicitly
+{:ok, response} = HTTPower.get("https://api.example.com/users",
+  adapter: HTTPower.Adapter.Req
+)
+
+# Or set it globally
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  adapter: HTTPower.Adapter.Req
+)
+
+{:ok, response} = HTTPower.get(client, "/users")
+```
+
+### Auto JSON decoding
+
+The Req adapter automatically decodes JSON response bodies — no need to call `Jason.decode!/1` manually:
+
+```elixir
+{:ok, response} = HTTPower.get("https://api.example.com/users",
+  adapter: HTTPower.Adapter.Req
+)
+
+# response.body is already a map
+IO.inspect(response.body)  # %{"users" => [...]}
+```
+
+### Req option pass-through
+
+Most `Req` options are passed through to the underlying client:
+
+```elixir
+HTTPower.get("https://api.example.com/data",
+  adapter: HTTPower.Adapter.Req,
+  # Req-specific options
+  connect_timeout: 15_000,
+  receive_timeout: 30_000,
+  decode_body: false
+)
+```
+
+  </Tab>
+  <Tab title="Tesla">
+
+### Tesla overview
+
+The Tesla adapter lets you wrap an existing Tesla client with HTTPower's reliability features. Your Tesla middleware stack — authentication, JSON encoding, logging, compression — continues to run unchanged.
+
+### Add the dependency
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:tesla, ">= 1.10.0"}
+  ]
+end
+```
+
+### Usage
+
+Pass your Tesla client as the second element of the `adapter` tuple:
+
+```elixir
+# Create your Tesla client as usual
+tesla_client = Tesla.client([
+  Tesla.Middleware.JSON,
+  {Tesla.Middleware.Headers, [{"user-agent", "MyApp/1.0"}]}
+])
+
+# Wrap with HTTPower
+client = HTTPower.new(
+  adapter: {HTTPower.Adapter.Tesla, tesla_client}
+)
+
+{:ok, response} = HTTPower.get(client, "https://api.example.com/users")
+```
+
+### Middleware compatibility
+
+All Tesla middleware continues to run. HTTPower adds its reliability layer on top — your plugs (BaseURL, JSON, Headers, Timeout, Compression, etc.) execute normally.
+
+```elixir
+defmodule MyApp.ApiClient do
+  use Tesla
+
+  plug Tesla.Middleware.BaseURL, "https://api.example.com"
+  plug Tesla.Middleware.JSON
+  plug Tesla.Middleware.Headers, [{"user-agent", "MyApp/1.0"}]
+  plug Tesla.Middleware.Timeout, timeout: 30_000
+
+  def client, do: Tesla.client([])
+end
+
+# Wrap the Tesla client with HTTPower
+httpower_client = HTTPower.new(
+  adapter: {HTTPower.Adapter.Tesla, MyApp.ApiClient.client()},
+  circuit_breaker: [failure_threshold: 5, timeout: 60_000],
+  rate_limit: [requests: 100, per: :minute]
+)
+
+{:ok, response} = HTTPower.get(httpower_client, "/users")
+```
+
+<Warning>
+Disable `Tesla.Middleware.Retry` if you are using HTTPower's retry logic, to avoid double-retrying.
+</Warning>
+
+  </Tab>
+</Tabs>
+
+## Selecting an adapter
+
+HTTPower supports adapter selection at three levels. Per-request options take precedence over per-client, which takes precedence over global configuration.
+
+### Global configuration
+
+Set a default adapter for all requests in your application:
+
+```elixir config/config.exs
+# Use Req as the default adapter
+config :httpower, adapter: HTTPower.Adapter.Req
+
+# Or use Tesla with a pre-built client
+config :httpower, adapter: {HTTPower.Adapter.Tesla, MyApp.TeslaClient.client()}
+```
+
+### Per-client
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  adapter: HTTPower.Adapter.Req
+)
+
+{:ok, response} = HTTPower.get(client, "/users")
+```
+
+### Per-request
+
+```elixir
+# Use Req for this specific request only
+{:ok, response} = HTTPower.get("https://api.example.com/users",
+  adapter: HTTPower.Adapter.Req
+)
+
+# Use Tesla with a client for this specific request
+tesla_client = MyApp.ApiClient.client()
+{:ok, response} = HTTPower.get("https://api.example.com/users",
+  adapter: {HTTPower.Adapter.Tesla, tesla_client}
+)
+```
+
+## Migration guides
+
+If you are coming from an existing Req or Tesla project, see the migration guides for step-by-step instructions.
+
+<CardGroup cols={2}>
+  <Card title="Migrating from Tesla" icon="arrow-right" href="/guides/migrating-from-tesla">
+    Add HTTPower on top of your existing Tesla client without rewriting your middleware.
+  </Card>
+  <Card title="Migrating from Req" icon="arrow-right" href="/guides/migrating-from-req">
+    Wrap your Req-based code with HTTPower's circuit breaker, rate limiting, and retry logic.
+  </Card>
+</CardGroup>

@@ -1,0 +1,185 @@
+---
+title: 'HTTPower.RateLimitHeaders'
+description: 'Parse rate limit headers from HTTP responses to synchronize with local rate limiter.'
+---
+
+`HTTPower.RateLimitHeaders` parses standard rate limit headers from HTTP responses and returns a normalized map that can be fed directly into `HTTPower.Middleware.RateLimiter.update_from_headers/2` to keep the local token bucket synchronized with the server's reported limits.
+
+## Functions
+
+### `parse/1` and `parse/2`
+
+Parses rate limit headers from a response headers map.
+
+```elixir
+@spec parse(headers :: map(), opts :: keyword()) ::
+  {:ok, rate_limit_info()} | {:error, :not_found}
+```
+
+<ParamField path="headers" type="map" required>
+  The response headers map. Keys are matched case-insensitively after normalization to lowercase.
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  <Expandable title="options">
+    <ParamField path="format" type="atom" default=":auto">
+      Force a specific header format instead of auto-detecting. One of `:auto`, `:github`, `:rfc`, `:stripe`, `:retry_after`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns** `{:ok, rate_limit_info}` if recognized headers are present, or `{:error, :not_found}` if no supported headers are found.
+
+#### Return value — `rate_limit_info`
+
+<ResponseField name="limit" type="integer">
+  Total number of requests allowed per rate limit window as reported by the server.
+</ResponseField>
+
+<ResponseField name="remaining" type="integer">
+  Number of requests remaining in the current window.
+</ResponseField>
+
+<ResponseField name="reset_at" type="DateTime">
+  UTC `DateTime` when the current rate limit window resets. Parsed from the Unix timestamp in the header.
+</ResponseField>
+
+<ResponseField name="format" type="atom">
+  The header format that was matched. One of `:github`, `:rfc`, `:stripe`.
+</ResponseField>
+
+---
+
+## Supported header formats
+
+### GitHub / Twitter style — `:github`
+
+Used by GitHub, Twitter/X, and many third-party APIs.
+
+```
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 55
+X-RateLimit-Reset: 1234567890
+```
+
+```elixir
+headers = %{
+  "x-ratelimit-limit" => "60",
+  "x-ratelimit-remaining" => "55",
+  "x-ratelimit-reset" => "1234567890"
+}
+
+{:ok, info} = HTTPower.RateLimitHeaders.parse(headers)
+# => {:ok, %{
+#      limit: 60,
+#      remaining: 55,
+#      reset_at: ~U[2009-02-13 23:31:30Z],
+#      format: :github
+#    }}
+```
+
+### RFC 6585 / IETF style — `:rfc`
+
+Used by APIs following the IETF draft standard for rate limit headers.
+
+```
+RateLimit-Limit: 100
+RateLimit-Remaining: 80
+RateLimit-Reset: 1234567890
+```
+
+```elixir
+headers = %{
+  "ratelimit-limit" => "100",
+  "ratelimit-remaining" => "80",
+  "ratelimit-reset" => "1234567890"
+}
+
+{:ok, info} = HTTPower.RateLimitHeaders.parse(headers)
+# => {:ok, %{limit: 100, remaining: 80, reset_at: ..., format: :rfc}}
+```
+
+### Stripe style — `:stripe`
+
+Used by the Stripe API.
+
+```
+X-Stripe-RateLimit-Limit: 100
+X-Stripe-RateLimit-Remaining: 90
+X-Stripe-RateLimit-Reset: 1234567890
+```
+
+```elixir
+headers = %{
+  "x-stripe-ratelimit-limit" => "100",
+  "x-stripe-ratelimit-remaining" => "90",
+  "x-stripe-ratelimit-reset" => "1234567890"
+}
+
+{:ok, info} = HTTPower.RateLimitHeaders.parse(headers, format: :stripe)
+# => {:ok, %{limit: 100, remaining: 90, reset_at: ..., format: :stripe}}
+```
+
+### Retry-After — `:retry_after`
+
+Used in `429 Too Many Requests` and `503 Service Unavailable` responses. Returns seconds until the client may retry rather than the full `rate_limit_info` map.
+
+```elixir
+@spec parse_retry_after(headers :: map()) :: {:ok, non_neg_integer()} | {:error, :not_found}
+```
+
+Accepts both a numeric seconds value and an RFC 7231 HTTP date string:
+
+```elixir
+# Numeric seconds
+HTTPower.RateLimitHeaders.parse_retry_after(%{"retry-after" => "120"})
+# => {:ok, 120}
+
+# HTTP date string
+HTTPower.RateLimitHeaders.parse_retry_after(%{
+  "retry-after" => "Wed, 21 Oct 2015 07:28:00 GMT"
+})
+# => {:ok, <seconds_until_that_time>}
+```
+
+---
+
+## Auto-detection order
+
+When `format: :auto` is used (the default), formats are tried in this order:
+
+1. GitHub / Twitter (`:github`)
+2. RFC 6585 / IETF (`:rfc`)
+3. Stripe (`:stripe`)
+
+The first format whose required headers are all present wins.
+
+---
+
+## Integration with `RateLimiter.update_from_headers/2`
+
+Pass the parsed `rate_limit_info` directly to the rate limiter to synchronize the local token bucket:
+
+```elixir
+defmodule MyApp.SyncedClient do
+  def get(url) do
+    {:ok, response} = HTTPower.get(url)
+
+    # After every response, sync local rate limit state with server headers
+    case HTTPower.RateLimitHeaders.parse(response.headers) do
+      {:ok, rate_limit_info} ->
+        bucket_key = URI.parse(url).host
+        HTTPower.Middleware.RateLimiter.update_from_headers(bucket_key, rate_limit_info)
+
+      {:error, :not_found} ->
+        :ok
+    end
+
+    {:ok, response}
+  end
+end
+```
+
+<Tip>
+Syncing after every response keeps the local bucket aligned with the server's actual state, preventing your client from making requests the server will reject, even if the local token count hasn't been depleted yet.
+</Tip>

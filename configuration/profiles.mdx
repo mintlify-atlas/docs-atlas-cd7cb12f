@@ -1,0 +1,188 @@
+---
+title: "Configuration profiles"
+description: "Pre-built profiles for payment processing, high-volume APIs, and microservices with optimized settings."
+---
+
+Profiles are named collections of configuration options that encode best practices for common scenarios. Instead of researching and tuning middleware settings yourself, you can apply a profile and get production-appropriate defaults immediately.
+
+## How profiles work
+
+A profile is merged with any explicit options you provide. **Explicit options always win.** This means you can start from a profile and override only the values that differ from your requirements.
+
+```elixir
+# Use a profile as-is
+client = HTTPower.new(
+  base_url: "https://payment-gateway.com",
+  profile: :payment_processing
+)
+
+# Override one value from the profile
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  profile: :high_volume_api,
+  rate_limit: [requests: 2000]  # overrides the profile's 1000 req/min
+)
+```
+
+## Available profiles
+
+### `:payment_processing`
+
+Optimized for payment gateways and financial APIs (Stripe, PayPal, etc.) where correctness matters more than speed. The defining concern is preventing double charges.
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| `rate_limit.enabled` | `true` | Prevent bursts toward payment providers |
+| `rate_limit.requests` | `100` | Conservative ceiling |
+| `rate_limit.per` | `:minute` | |
+| `rate_limit.strategy` | `:wait` | Wait rather than fail |
+| `rate_limit.max_wait_time` | `5000` ms | |
+| `rate_limit.adaptive` | `true` | Reduce rate when service is struggling |
+| `circuit_breaker.enabled` | `true` | |
+| `circuit_breaker.failure_threshold` | `6` | Absolute count |
+| `circuit_breaker.failure_threshold_percentage` | `30.0` | Open at 30% failure rate |
+| `circuit_breaker.window_size` | `20` | |
+| `circuit_breaker.timeout` | `30_000` ms | Long timeout for slow payment APIs |
+| `circuit_breaker.half_open_requests` | `3` | Test with multiple requests before closing |
+| `deduplicate.enabled` | `true` | Prevent double charges |
+| `deduplicate.ttl` | `5_000` ms | 5-second dedup window |
+| `max_retries` | `3` | |
+| `base_delay` | `2_000` ms | Slower backoff for slow gateways |
+| `max_delay` | `30_000` ms | |
+
+<Tip>
+The combination of client-side deduplication (`ttl: 5_000`) and conservative circuit breaking (`30%` threshold) is what prevents double charges in most failure scenarios.
+</Tip>
+
+### `:high_volume_api`
+
+Optimized for high-throughput scenarios such as public APIs or heavily-used internal services. Prioritizes throughput and fast recovery over conservatism.
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| `rate_limit.enabled` | `true` | |
+| `rate_limit.requests` | `1000` | High throughput ceiling |
+| `rate_limit.per` | `:minute` | |
+| `rate_limit.strategy` | `:wait` | |
+| `rate_limit.max_wait_time` | `5000` ms | |
+| `rate_limit.adaptive` | `true` | |
+| `circuit_breaker.enabled` | `true` | |
+| `circuit_breaker.failure_threshold` | `50` | Tolerant at high volume |
+| `circuit_breaker.failure_threshold_percentage` | `50.0` | Open at 50% failure rate |
+| `circuit_breaker.window_size` | `100` | Large window for accurate stats |
+| `circuit_breaker.timeout` | `5_000` ms | Fast recovery |
+| `circuit_breaker.half_open_requests` | `10` | Aggressive recovery testing |
+| `deduplicate.enabled` | `true` | Share responses across concurrent requests |
+| `deduplicate.ttl` | `1_000` ms | Short window |
+| `max_retries` | `2` | Fewer retries — fail fast |
+| `base_delay` | `500` ms | Quick backoff |
+| `max_delay` | `10_000` ms | |
+
+<Note>
+The short deduplication TTL (`1_000` ms) combined with response sharing means identical concurrent requests are coalesced. Under high load this can provide a significant reduction in actual outbound requests.
+</Note>
+
+### `:microservices_mesh`
+
+Optimized for service-to-service calls within a microservices architecture (Kubernetes, service mesh). The primary concern is preventing cascade failures and retry storms.
+
+| Setting | Value | Rationale |
+|---------|-------|-----------|
+| `rate_limit.enabled` | `true` | |
+| `rate_limit.requests` | `500` | Moderate ceiling |
+| `rate_limit.per` | `:minute` | |
+| `rate_limit.strategy` | `:wait` | |
+| `rate_limit.max_wait_time` | `5000` ms | |
+| `rate_limit.adaptive` | `true` | Signals circuit health to rate limiter |
+| `circuit_breaker.enabled` | `true` | |
+| `circuit_breaker.failure_threshold` | `20` | |
+| `circuit_breaker.failure_threshold_percentage` | `40.0` | Open at 40% failure rate |
+| `circuit_breaker.window_size` | `50` | |
+| `circuit_breaker.timeout` | `10_000` ms | |
+| `circuit_breaker.half_open_requests` | `5` | |
+| `deduplicate.enabled` | `true` | Critical for retry storm prevention |
+| `deduplicate.ttl` | `2_000` ms | 2-second dedup window |
+| `max_retries` | `3` | |
+| `base_delay` | `1_000` ms | |
+| `max_delay` | `20_000` ms | |
+
+<Warning>
+In a service mesh, retry storms — where retries from one failing service cause overload in others — are a common source of outages. The deduplication TTL of `2_000` ms and adaptive rate limiting are specifically tuned to suppress this pattern.
+</Warning>
+
+## Using profiles
+
+### Basic usage
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  headers: %{"authorization" => "Bearer #{stripe_key}"},
+  profile: :payment_processing
+)
+
+HTTPower.post(client, "/v1/charges", body: charge_data)
+```
+
+### Overriding profile settings
+
+Explicit options take precedence over profile defaults:
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://internal-service",
+  profile: :microservices_mesh,
+  # Override profile's circuit breaker timeout for this service
+  circuit_breaker: [timeout: 5_000],
+  # Override profile's max retries
+  max_retries: 1
+)
+```
+
+## API reference
+
+### `HTTPower.Profiles.get/1`
+
+Returns the full configuration keyword list for a profile by name.
+
+```elixir
+@spec get(atom()) :: {:ok, keyword()} | {:error, :unknown_profile}
+```
+
+```elixir
+{:ok, config} = HTTPower.Profiles.get(:payment_processing)
+# => {:ok, [rate_limit: [...], circuit_breaker: [...], ...]}
+
+{:error, :unknown_profile} = HTTPower.Profiles.get(:nonexistent)
+```
+
+Use this to inspect what a profile contains or to merge profile settings programmatically.
+
+### `HTTPower.Profiles.list/0`
+
+Returns the list of all available profile names.
+
+```elixir
+@spec list() :: [atom()]
+```
+
+```elixir
+HTTPower.Profiles.list()
+# => [:payment_processing, :high_volume_api, :microservices_mesh]
+```
+
+## Choosing a profile
+
+Use this as a starting point:
+
+| Scenario | Recommended profile |
+|----------|---------------------|
+| Stripe, PayPal, any payment gateway | `:payment_processing` |
+| Financial or compliance-sensitive APIs | `:payment_processing` |
+| Public REST APIs with high request volume | `:high_volume_api` |
+| Content APIs, CDN-backed endpoints | `:high_volume_api` |
+| Internal service-to-service calls | `:microservices_mesh` |
+| Kubernetes workloads calling other services | `:microservices_mesh` |
+| General-purpose API client | Start with `:microservices_mesh`, tune down |
+
+If none of the profiles fit, use `HTTPower.Profiles.get/1` to read a profile's values as a starting point, then configure your client explicitly with adjusted values.

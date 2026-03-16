@@ -1,0 +1,219 @@
+---
+title: "PCI-compliant logging"
+description: "Automatic sanitization of sensitive data with structured metadata for log aggregation systems."
+---
+
+HTTPower includes opt-in telemetry-based logging with automatic PCI-compliant data sanitization. Sensitive data in headers and request bodies is automatically redacted before writing to logs.
+
+## Quick start
+
+Attach the logger in your application startup:
+
+```elixir lib/my_app/application.ex
+defmodule MyApp.Application do
+  use Application
+
+  def start(_type, _args) do
+    HTTPower.Logger.attach()
+
+    children = [
+      # ... your supervision tree
+    ]
+
+    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+end
+```
+
+All HTTP requests and responses are now logged with sanitization applied:
+
+```
+[HTTPower] [req_a1b2c3d4e5f6g7h8] → GET https://api.example.com/users headers=%{"authorization" => "[REDACTED]"}
+[HTTPower] [req_a1b2c3d4e5f6g7h8] ← 200 (45ms) body=%{"users" => [...]}
+```
+
+## What gets sanitized
+
+### Headers
+
+The following request and response headers are automatically redacted:
+
+- `authorization`
+- `api-key`
+- `x-api-key`
+- `api_key`
+- `apikey`
+- `secret`
+- `token`
+- `x-auth-token`
+- `x-csrf-token`
+- `cookie`
+- `set-cookie`
+
+### Body fields
+
+The following JSON body fields are automatically redacted:
+
+- `password`, `passwd`, `pwd`
+- `secret`
+- `api_key`, `apikey`
+- `token`
+- `credit_card`, `creditcard`, `card_number`, `cardnumber`
+- `cvv`, `cvv2`, `cvc`
+- `pin`
+- `ssn`, `social_security`
+
+### Patterns
+
+- **Credit card numbers** — any 13–19 digit sequence that passes the Luhn checksum
+- **CVV codes** — 3–4 digit values following a CVV-related keyword
+
+### Log output examples
+
+```elixir
+# Authorization header redacted
+HTTPower.get("https://api.example.com/users",
+  headers: %{"Authorization" => "Bearer secret-token"}
+)
+# Logs: headers=%{"authorization" => "[REDACTED]"}
+
+# Credit card number redacted
+HTTPower.post("https://payment-api.com/charge",
+  body: ~s({"card": "4111111111111111", "amount": 100})
+)
+# Logs: body={"card": "[REDACTED]", "amount": 100}
+
+# Password field redacted
+HTTPower.post("https://api.example.com/login",
+  body: ~s({"username": "alice", "password": "hunter2"})
+)
+# Logs: body={"username": "alice", "password": "[REDACTED]"}
+```
+
+## Structured metadata
+
+Every log entry sets machine-readable metadata via `Logger.metadata/1`, enabling structured querying in log aggregation systems.
+
+### Request metadata
+
+| Key | Description |
+|-----|-------------|
+| `httpower_correlation_id` | Unique request identifier (format: `req_` + 16 hex chars) |
+| `httpower_event` | Event type: `:request` |
+| `httpower_method` | HTTP method (`:get`, `:post`, etc.) |
+| `httpower_url` | Request URL |
+| `httpower_headers` | Sanitized request headers (if `log_headers: true`) |
+| `httpower_body` | Sanitized request body (if `log_body: true`) |
+
+### Response metadata
+
+| Key | Description |
+|-----|-------------|
+| `httpower_correlation_id` | Matches the request correlation ID |
+| `httpower_event` | Event type: `:response` |
+| `httpower_status` | HTTP status code |
+| `httpower_duration_ms` | Request duration in milliseconds |
+| `httpower_response_headers` | Sanitized response headers (if `log_headers: true`) |
+| `httpower_response_body` | Sanitized response body (if `log_body: true`) |
+
+### Exception metadata
+
+| Key | Description |
+|-----|-------------|
+| `httpower_correlation_id` | Request correlation ID |
+| `httpower_event` | Event type: `:exception` |
+| `httpower_duration_ms` | Time until exception |
+| `httpower_exception_kind` | Exception kind (`:error`, `:exit`, `:throw`) |
+| `httpower_exception_reason` | Exception reason |
+
+## Log aggregation queries
+
+<Tabs>
+  <Tab title="Datadog">
+    ```
+    # Slow requests
+    @httpower_duration_ms:>1000
+
+    # All 5xx errors
+    @httpower_status:>=500
+
+    # Trace a specific request
+    @httpower_correlation_id:"req_abc123"
+
+    # POST requests only
+    @httpower_method:post
+    ```
+  </Tab>
+  <Tab title="Splunk">
+    ```
+    # Slow requests
+    httpower_duration_ms > 1000
+
+    # All 5xx errors
+    httpower_status >= 500
+
+    # Trace a specific request
+    httpower_correlation_id="req_abc123"
+
+    # POST requests only
+    httpower_method=post
+    ```
+  </Tab>
+</Tabs>
+
+## `attach/1` options
+
+```elixir
+HTTPower.Logger.attach(
+  level: :debug,
+  log_headers: true,
+  log_body: true,
+  sanitize_headers: ["x-custom-token"],      # Additional headers to sanitize
+  sanitize_body_fields: ["secret_key"]       # Additional body fields to sanitize
+)
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `level` | atom | `:info` | Log level (`:debug`, `:info`, `:warning`, `:error`) |
+| `log_headers` | boolean | `true` | Include sanitized headers in log output |
+| `log_body` | boolean | `true` | Include sanitized body in log output |
+| `sanitize_headers` | list | `[]` | Additional header names to redact |
+| `sanitize_body_fields` | list | `[]` | Additional body field names to redact |
+
+Alternatively, configure via Application config (used when calling `attach/0` with no arguments):
+
+```elixir config/config.exs
+config :httpower, :logging,
+  level: :info,
+  log_headers: true,
+  log_body: true,
+  sanitize_headers: ["x-custom-token"],
+  sanitize_body_fields: ["secret_key"]
+```
+
+<Warning>
+  Custom sanitization fields are **additive**. They extend the default list rather than replacing it. You cannot remove a field from the default sanitization list through configuration.
+</Warning>
+
+## Disabling logging
+
+Logging is opt-in — do not call `attach/0` to keep it disabled. To disable logging at runtime:
+
+```elixir
+HTTPower.Logger.detach()
+```
+
+## Correlation IDs and distributed tracing
+
+Every request receives a unique correlation ID in the format `req_` followed by 16 hexadecimal characters:
+
+```
+[HTTPower] [req_a1b2c3d4e5f6g7h8] → GET https://api.example.com/users
+[HTTPower] [req_a1b2c3d4e5f6g7h8] ← 200 (245ms)
+```
+
+In Phoenix applications, if `Logger.metadata()[:request_id]` is set (e.g., by `Plug.RequestId`), HTTPower reuses that ID instead of generating a new one. This links outgoing HTTP requests to the originating Phoenix request in your logs.
+
+Correlation IDs are also available as structured metadata (`httpower_correlation_id`) for querying in log aggregation systems.

@@ -1,0 +1,298 @@
+---
+title: "Test mode"
+description: "Block real HTTP requests during testing and use adapter-agnostic mocking with HTTPower.Test."
+---
+
+Test mode prevents your test suite from making real HTTP requests. When enabled, any request that is not intercepted by a test stub returns `{:error, %HTTPower.Error{reason: :network_blocked}}` immediately — no network calls are made.
+
+This gives you confidence that tests are isolated, fast, and will not incidentally hit real services.
+
+## Enabling test mode
+
+<Steps>
+  <Step title="Set test_mode in test_helper.exs">
+    Add the following to `test/test_helper.exs` before `ExUnit.start()`:
+
+    ```elixir test/test_helper.exs
+    Application.put_env(:httpower, :test_mode, true)
+    ExUnit.start()
+    ```
+  </Step>
+  <Step title="Add Plug to test dependencies">
+    `HTTPower.Test` requires `plug` to build mock connections. Add it to your test dependencies in `mix.exs`:
+
+    ```elixir mix.exs
+    defp deps do
+      [
+        {:httpower, "~> 0.19"},
+        {:plug, "~> 1.15", only: :test}
+      ]
+    end
+    ```
+  </Step>
+  <Step title="Call HTTPower.Test.setup/0 in each test">
+    In each test module that mocks HTTP, call `HTTPower.Test.setup/0` in the `setup` block:
+
+    ```elixir
+    setup do
+      HTTPower.Test.setup()
+    end
+    ```
+  </Step>
+</Steps>
+
+## HTTPower.Test module
+
+`HTTPower.Test` provides an adapter-agnostic mocking interface. It works regardless of whether your application uses Finch, Req, or Tesla.
+
+### `setup/0`
+
+Registers the current test process as the owner of a mock slot and schedules cleanup when the test exits.
+
+```elixir
+@spec setup() :: :ok
+```
+
+Call this in your `setup` block. Attempting to call `stub/1` without calling `setup/0` first raises a descriptive error.
+
+```elixir
+setup do
+  HTTPower.Test.setup()
+end
+```
+
+### `stub/1`
+
+Registers a function to handle HTTP requests for the current test. The function receives a `Plug.Conn` and must return a `Plug.Conn` with the response set.
+
+```elixir
+@spec stub((Plug.Conn.t() -> Plug.Conn.t())) :: :ok
+```
+
+```elixir
+HTTPower.Test.stub(fn conn ->
+  case {conn.method, conn.request_path} do
+    {"GET", "/users"} ->
+      HTTPower.Test.json(conn, %{users: ["alice", "bob"]})
+
+    {"POST", "/users"} ->
+      HTTPower.Test.json(conn, %{created: true}, status: 201)
+
+    _ ->
+      HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+  end
+end)
+```
+
+### `json/3`
+
+Sets a JSON response on the connection.
+
+```elixir
+@spec json(Plug.Conn.t(), term(), keyword()) :: Plug.Conn.t()
+```
+
+Options:
+- `:status` — HTTP status code (default: `200`)
+
+```elixir
+HTTPower.Test.json(conn, %{success: true})
+HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+```
+
+### `html/3`
+
+Sets an HTML response on the connection.
+
+```elixir
+@spec html(Plug.Conn.t(), String.t(), keyword()) :: Plug.Conn.t()
+```
+
+Options:
+- `:status` — HTTP status code (default: `200`)
+
+### `text/3`
+
+Sets a plain text response on the connection.
+
+```elixir
+@spec text(Plug.Conn.t(), String.t(), keyword()) :: Plug.Conn.t()
+```
+
+Options:
+- `:status` — HTTP status code (default: `200`)
+
+### `transport_error/2`
+
+Simulates a network-level transport failure.
+
+```elixir
+@spec transport_error(Plug.Conn.t(), :timeout | :closed | :econnrefused | :nxdomain) :: Plug.Conn.t()
+```
+
+```elixir
+HTTPower.Test.stub(fn conn ->
+  HTTPower.Test.transport_error(conn, :timeout)
+end)
+
+{:error, error} = HTTPower.get("https://api.example.com/slow")
+assert error.reason == :test_transport_error
+assert error.message =~ "timeout"
+```
+
+### `allow/2`
+
+Allows a specific process (such as a GenServer) to use the current test's mock. Not needed for processes spawned from the test process — those inherit mocks automatically via `$callers`.
+
+```elixir
+@spec allow(pid(), pid()) :: :ok
+```
+
+```elixir
+setup do
+  HTTPower.Test.setup()
+  HTTPower.Test.allow(Process.whereis(MyApp.HttpWorker))
+end
+```
+
+## Complete test example
+
+```elixir test/my_app/api_client_test.exs
+defmodule MyApp.ApiClientTest do
+  use ExUnit.Case
+
+  setup do
+    HTTPower.Test.setup()
+  end
+
+  test "fetches users successfully" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.json(conn, %{users: ["alice", "bob"]})
+    end)
+
+    {:ok, response} = HTTPower.get("https://api.example.com/users")
+
+    assert response.status == 200
+    assert response.body == %{"users" => ["alice", "bob"]}
+  end
+
+  test "handles error responses" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+    end)
+
+    {:ok, response} = HTTPower.get("https://api.example.com/missing")
+
+    assert response.status == 404
+    assert response.body == %{"error" => "not found"}
+  end
+
+  test "handles transport errors" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.transport_error(conn, :econnrefused)
+    end)
+
+    {:error, error} = HTTPower.get("https://api.example.com/users")
+
+    assert error.reason == :test_transport_error
+  end
+
+  test "real requests are blocked in test mode" do
+    # No stub registered — any request without a stub is blocked
+    # When test mode is enabled without a stub, requests are blocked
+    # This test verifies test mode is active by checking the error reason
+    # after setting up (setup/0 registers the process but no stub)
+    {:error, error} = HTTPower.get("https://real-api.com/endpoint")
+    assert error.reason in [:network_blocked, :test_stub_error]
+  end
+end
+```
+
+<Note>
+HTTPower.Test stubs are process-local. Each test process has its own stub, so tests run concurrently without interfering with each other.
+</Note>
+
+## Config-based test setup
+
+For a complete test environment, use both `test_helper.exs` and `config/test.exs`:
+
+```elixir test/test_helper.exs
+Application.put_env(:httpower, :test_mode, true)
+ExUnit.start()
+```
+
+```elixir config/test.exs
+config :httpower,
+  test_mode: true,
+  logging: [enabled: false],
+  circuit_breaker: [enabled: false],
+  rate_limit: [enabled: false]
+```
+
+Disabling the circuit breaker and rate limiter in test config prevents middleware state from leaking between tests.
+
+## Testing with different adapters
+
+`HTTPower.Test` is independent of your HTTP adapter. The same test code works whether your application uses Finch, Req, or Tesla.
+
+<CodeGroup>
+
+```elixir With Finch
+# mix.exs deps
+{:finch, ">= 0.19.0"},
+{:plug, "~> 1.15", only: :test}
+
+# config/test.exs
+config :httpower, adapter: HTTPower.Adapter.Finch, test_mode: true
+```
+
+```elixir With Req
+# mix.exs deps
+{:req, ">= 0.4.0"},
+{:plug, "~> 1.15", only: :test}
+
+# config/test.exs
+config :httpower, adapter: HTTPower.Adapter.Req, test_mode: true
+```
+
+```elixir With Tesla
+# mix.exs deps
+{:tesla, ">= 1.10.0"},
+{:plug, "~> 1.15", only: :test}
+
+# config/test.exs
+config :httpower, adapter: HTTPower.Adapter.Tesla, test_mode: true
+```
+
+</CodeGroup>
+
+The stub function, `json/3`, `html/3`, `text/3`, and `transport_error/2` behave identically regardless of which adapter is configured.
+
+## Best practices
+
+**Always call `setup/0` in the `setup` block.** Calling it in individual tests or in `setup_all` leads to unexpected behavior — stubs are tied to the test process lifetime.
+
+**Register one stub per test, not one per module.** Stubs are replaced on each `stub/1` call, so the last call wins. If you need different responses, use pattern matching inside a single stub:
+
+```elixir
+HTTPower.Test.stub(fn conn ->
+  case conn.request_path do
+    "/ok"    -> HTTPower.Test.json(conn, %{status: "ok"})
+    "/error" -> HTTPower.Test.json(conn, %{error: true}, status: 500)
+    _        -> HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+  end
+end)
+```
+
+**Use `transport_error/2` to test failure handling.** Returning error status codes (4xx, 5xx) is not the same as a transport failure. Use `transport_error/2` to test your application's handling of timeouts, refused connections, and DNS failures.
+
+**For GenServers and supervised processes, use `allow/2`.** Processes that were started before the test (e.g., in `start_supervised/1`) do not inherit the test's mock automatically.
+
+```elixir
+setup do
+  HTTPower.Test.setup()
+  {:ok, pid} = start_supervised(MyApp.HttpWorker)
+  HTTPower.Test.allow(pid)
+  :ok
+end
+```

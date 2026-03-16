@@ -1,0 +1,128 @@
+---
+title: 'HTTPower.Middleware.Dedup'
+description: 'Request deduplication middleware for preventing duplicate in-flight requests.'
+---
+
+`HTTPower.Middleware.Dedup` prevents duplicate concurrent requests from causing duplicate side effects — such as double charges or duplicate orders — by tracking in-flight requests and sharing responses across identical concurrent callers.
+
+## How it works
+
+<Steps>
+  <Step title="Request fingerprinting">
+    Each request receives a SHA-256 hash derived from the HTTP method, full URL, and request body:
+
+    ```elixir
+    # Internally computed as:
+    content = "#{method}:#{url}:#{body || ""}"
+    hash = :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+    ```
+
+    You can override the automatic hash with a custom key via the `:key` option.
+  </Step>
+
+  <Step title="In-flight tracking">
+    The first request with a given hash executes normally. Any subsequent request with the same hash that arrives while the first is still in flight is held and added to the waiter list.
+  </Step>
+
+  <Step title="Response sharing">
+    When the first request completes, its response is broadcast to all waiting callers. All waiters receive the same `{:ok, response}` result without making an additional network call.
+  </Step>
+
+  <Step title="Automatic cleanup">
+    Completed request entries are automatically removed **500 ms** after completion. In-flight entries are cleaned up every 5 seconds. If the process that made the original request dies, all waiters are notified with `{:error, :requester_down}`.
+  </Step>
+</Steps>
+
+## Deduplication states
+
+| State | Description |
+|-------|-------------|
+| `:in_flight` | Request is currently executing; identical concurrent requests will wait. |
+| `:completed` | Brief 500 ms window after completion to catch race conditions. |
+
+## Configuration
+
+<CodeGroup>
+
+```elixir global config
+config :httpower, :deduplicate,
+  enabled: true,
+  ttl: 5_000  # ms — how long to track in-flight requests
+```
+
+```elixir per-request (boolean)
+HTTPower.post(url,
+  body: payment_data,
+  deduplicate: true
+)
+```
+
+```elixir per-request (options)
+HTTPower.post(url,
+  body: payment_data,
+  deduplicate: [
+    enabled: true,
+    ttl: 10_000,
+    wait_timeout: 60_000,
+    key: "custom-dedup-key"
+  ]
+)
+```
+
+</CodeGroup>
+
+### Options
+
+<ParamField path="enabled" type="boolean" default="false">
+  Whether deduplication is active for this request. Can be set globally or per-request.
+</ParamField>
+
+<ParamField path="key" type="string">
+  Override the automatically computed deduplication key. When set, this exact string is used as the hash instead of deriving one from the method, URL, and body.
+</ParamField>
+
+<ParamField path="ttl" type="integer" default="5000">
+  How long (in milliseconds) to track an in-flight request. Completed entries are cleaned up 500 ms after completion regardless of this value.
+</ParamField>
+
+<ParamField path="wait_timeout" type="integer" default="30000">
+  How long (in milliseconds) a waiting caller will block before returning `{:error, %HTTPower.Error{reason: :dedup_timeout}}`.
+</ParamField>
+
+## Thread safety
+
+Dedup uses an ETS table for storage and a `GenServer` for coordination. The GenServer serializes state transitions (marking requests as in-flight, adding waiters, broadcasting completions), while ETS allows lock-free reads for cache hits.
+
+<Note>
+If the process that initiated a deduplicated request crashes, all waiting processes receive `{:error, :requester_down}` via a process monitor.
+</Note>
+
+## Examples
+
+```elixir
+# Basic: prevent double charge on payment button double-click
+HTTPower.post("https://api.stripe.com/v1/charges",
+  body: %{amount: 1000, currency: "usd"},
+  deduplicate: true
+)
+
+# Advanced: use a stable idempotency key from the business layer
+HTTPower.post("https://api.stripe.com/v1/charges",
+  body: %{amount: 1000, currency: "usd"},
+  deduplicate: [
+    enabled: true,
+    key: "charge_#{order_id}",
+    ttl: 30_000
+  ]
+)
+```
+
+## Use cases
+
+- **Payment gateways** — prevent double charges from double-clicks or retry storms
+- **Order submission** — ensure a single order is created even under concurrent POST requests
+- **Idempotent mutations** — deduplicate POST / PUT / DELETE requests during retry bursts
+
+<Tip>
+The `:payment_processing` profile in `HTTPower.Profiles` enables deduplication with a 5-second TTL out of the box.
+</Tip>

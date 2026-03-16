@@ -1,0 +1,110 @@
+---
+title: "Introduction"
+description: "HTTPower is a production-ready Elixir HTTP client library with built-in reliability patterns — circuit breaker, rate limiting, PCI-compliant logging, and smart retries."
+---
+
+## What is HTTPower?
+
+HTTPower wraps your existing HTTP client (Finch, Req, or Tesla) with a production reliability layer. Instead of implementing circuit breakers, rate limiters, and retry logic yourself, HTTPower provides them as built-in, composable features that work across all supported adapters.
+
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:finch, ">= 0.19.0"}  # or :req or :tesla
+  ]
+end
+```
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Circuit breaker" icon="shield-halved" href="/features/circuit-breaker">
+    Automatic failure detection with closed/open/half-open state machine. Prevents cascade failures across services.
+  </Card>
+  <Card title="Rate limiting" icon="gauge-high" href="/features/rate-limiting">
+    Token bucket algorithm with per-endpoint configuration. Supports `:wait` and `:error` strategies.
+  </Card>
+  <Card title="PCI-compliant logging" icon="lock" href="/features/pci-logging">
+    Automatic sanitization of credentials, card numbers, CVVs, and other sensitive data from all logs.
+  </Card>
+  <Card title="Smart retries" icon="arrows-rotate" href="/features/retries">
+    Exponential backoff with jitter, Retry-After header parsing, and configurable retry policies.
+  </Card>
+  <Card title="Request deduplication" icon="copy" href="/features/deduplication">
+    In-flight deduplication prevents double-charges from double-clicks or race conditions.
+  </Card>
+  <Card title="Telemetry" icon="chart-line" href="/features/telemetry">
+    Comprehensive `:telemetry` events for Prometheus, OpenTelemetry, and Phoenix LiveDashboard.
+  </Card>
+</CardGroup>
+
+## Why HTTPower?
+
+Most HTTP client libraries leave reliability concerns to the caller. This means every team reimplements the same patterns — often incorrectly or inconsistently.
+
+HTTPower solves this by providing battle-tested reliability patterns as first-class features:
+
+- **Never raises exceptions** — every HTTP operation returns `{:ok, response}` or `{:error, reason}`
+- **Adapter-agnostic** — switch between Finch, Req, and Tesla without changing your application code
+- **Layered configuration** — set sensible defaults globally, override per-client, override per-request
+- **Production profiles** — pre-tuned settings for payment processing, high-volume APIs, and microservices
+
+## Perfect for
+
+<CardGroup cols={2}>
+  <Card title="Payment processing" icon="credit-card">
+    PCI-compliant logging, deduplication to prevent double charges, and circuit breakers for payment gateway reliability.
+  </Card>
+  <Card title="Microservices" icon="diagram-project">
+    Reliability patterns across service boundaries with telemetry for distributed tracing.
+  </Card>
+  <Card title="Third-party API integrations" icon="plug">
+    Rate limiting to respect API quotas, circuit breakers to handle outages gracefully.
+  </Card>
+  <Card title="Financial services" icon="building-columns">
+    Compliance-ready logging with audit trails and comprehensive observability.
+  </Card>
+</CardGroup>
+
+## Quick example
+
+```elixir
+# Create a payment client with production-ready defaults
+client = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  profile: :payment_processing,
+  headers: %{"Authorization" => "Bearer #{api_key}"}
+)
+
+# Make requests — circuit breaker, rate limiting, and dedup are automatic
+case HTTPower.post(client, "/v1/charges", body: charge_params) do
+  {:ok, %HTTPower.Response{status: 200, body: charge}} ->
+    handle_success(charge)
+
+  {:error, %HTTPower.Error{reason: :service_unavailable}} ->
+    # Circuit is open — payment gateway is having issues
+    use_fallback_processor()
+
+  {:error, %HTTPower.Error{reason: :too_many_requests}} ->
+    # Rate limit exceeded
+    schedule_retry()
+end
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get HTTPower installed and making requests in minutes.
+  </Card>
+  <Card title="Adapters" icon="plug" href="/adapters">
+    Choose between Finch, Req, and Tesla adapters.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration/overview">
+    Explore all configuration options and precedence rules.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/httpower">
+    Full function reference for all public APIs.
+  </Card>
+</CardGroup>

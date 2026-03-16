@@ -1,0 +1,192 @@
+---
+title: "Circuit breaker"
+description: "Automatic failure detection and recovery with closed, open, and half-open states."
+---
+
+The circuit breaker pattern protects your application from cascading failures when a downstream service is degraded or unavailable. HTTPower's circuit breaker is disabled by default and must be explicitly enabled.
+
+## How the circuit breaker works
+
+The circuit breaker tracks the outcome of recent requests in a sliding window and transitions between three states based on failure rates.
+
+<Steps>
+  <Step title="Closed — normal operation">
+    All requests pass through normally. Failures are recorded in a sliding window. When the failure threshold is exceeded, the circuit transitions to **Open**.
+  </Step>
+  <Step title="Open — failing service">
+    All requests fail immediately with `{:error, %HTTPower.Error{reason: :service_unavailable}}` — no actual network call is made. After a configurable timeout, the circuit transitions to **Half-Open**.
+  </Step>
+  <Step title="Half-Open — testing recovery">
+    A limited number of test requests are allowed through. If they succeed, the circuit closes. If any fail, the circuit returns to **Open**.
+  </Step>
+</Steps>
+
+## Threshold strategies
+
+### Absolute threshold
+
+Opens the circuit after a fixed number of failures within the sliding window.
+
+```elixir config/config.exs
+config :httpower, :circuit_breaker,
+  enabled: true,
+  failure_threshold: 5,   # Open after 5 failures...
+  window_size: 10         # ...in the last 10 requests
+```
+
+### Percentage threshold
+
+Opens the circuit when the failure rate exceeds a percentage. Requires the window to be full before triggering.
+
+```elixir config/config.exs
+config :httpower, :circuit_breaker,
+  enabled: true,
+  failure_threshold_percentage: 50,  # Open at 50% failure rate
+  window_size: 10                     # Minimum 10 requests before activating
+```
+
+<Note>
+  Both thresholds can be set simultaneously. The circuit opens when either condition is met.
+</Note>
+
+## Configuration
+
+<Tabs>
+  <Tab title="Global config">
+    ```elixir config/config.exs
+    config :httpower, :circuit_breaker,
+      enabled: true,
+      failure_threshold: 5,
+      window_size: 10,
+      timeout: 60_000,
+      half_open_requests: 1
+    ```
+  </Tab>
+  <Tab title="Per-client">
+    ```elixir
+    payment_gateway = HTTPower.new(
+      base_url: "https://api.payment-gateway.com",
+      circuit_breaker: [
+        failure_threshold: 3,
+        timeout: 30_000
+      ]
+    )
+
+    HTTPower.post(payment_gateway, "/charge", body: %{amount: 100})
+    ```
+  </Tab>
+  <Tab title="Per-request key">
+    ```elixir
+    # Group multiple endpoints under the same circuit breaker
+    HTTPower.get("https://api.example.com/endpoint1",
+      circuit_breaker_key: "example_api"
+    )
+
+    HTTPower.get("https://api.example.com/endpoint2",
+      circuit_breaker_key: "example_api"  # Shares same circuit breaker
+    )
+    ```
+  </Tab>
+</Tabs>
+
+### Configuration options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable or disable the circuit breaker |
+| `failure_threshold` | integer | `5` | Failures to trigger open state |
+| `failure_threshold_percentage` | integer | `nil` | Failure rate percentage to trigger open state |
+| `window_size` | integer | `10` | Number of recent requests to track |
+| `timeout` | integer | `60_000` | Milliseconds to stay open before trying half-open |
+| `half_open_requests` | integer | `1` | Test requests allowed in half-open state |
+
+## Manual control
+
+You can manually manage circuit state for deployment workflows, testing, or operational intervention.
+
+```elixir
+# Check current state — returns :closed | :open | :half_open | nil
+HTTPower.Middleware.CircuitBreaker.get_state("payment_api")
+
+# Manually open a circuit (e.g., before a known-bad deployment)
+HTTPower.Middleware.CircuitBreaker.open_circuit("payment_api")
+
+# Manually close a circuit (e.g., after confirming service recovery)
+HTTPower.Middleware.CircuitBreaker.close_circuit("payment_api")
+
+# Reset a circuit to initial state (clears all history)
+HTTPower.Middleware.CircuitBreaker.reset_circuit("payment_api")
+```
+
+## Real-world examples
+
+### Payment gateway protection
+
+```elixir
+payment = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  circuit_breaker: [
+    failure_threshold: 3,
+    timeout: 30_000,
+    half_open_requests: 2
+  ]
+)
+
+case HTTPower.post(payment, "/charges", body: charge_data) do
+  {:ok, response} ->
+    handle_payment(response)
+
+  {:error, %{reason: :service_unavailable}} ->
+    # Circuit is open — use a fallback payment method
+    use_fallback_payment_method()
+
+  {:error, error} ->
+    handle_payment_error(error)
+end
+```
+
+### Cascading failure prevention
+
+Once the circuit opens, subsequent requests short-circuit immediately without making network calls:
+
+```elixir
+# 5 consecutive failures open the circuit
+for _ <- 1..5 do
+  {:error, _} = HTTPower.get("https://failing-api.com/endpoint")
+end
+
+# Subsequent requests fail immediately (no cascading failures)
+{:error, %{reason: :service_unavailable}} =
+  HTTPower.get("https://failing-api.com/endpoint")
+
+# After 60 seconds, circuit enters half-open
+:timer.sleep(60_000)
+
+# First successful request closes the circuit
+{:ok, _} = HTTPower.get("https://failing-api.com/endpoint")
+```
+
+## Combining with retries
+
+The circuit breaker and retries serve complementary roles and work well together:
+
+- **Retries** handle transient failures — temporary timeouts, brief service blips
+- **Circuit breaker** handles persistent failures — service is down, deployment issues
+
+```elixir
+HTTPower.get("https://api.example.com/users",
+  # Retry on transient failures
+  max_retries: 3,
+  base_delay: 1000,
+
+  # Circuit breaker for persistent failures
+  circuit_breaker: [
+    failure_threshold: 5,
+    timeout: 60_000
+  ]
+)
+```
+
+<Tip>
+  The circuit breaker evaluates once per logical request, not once per retry attempt. This means 3 retries on a single request counts as 1 failure if all attempts fail — not 3 separate failures.
+</Tip>

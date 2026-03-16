@@ -1,0 +1,516 @@
+---
+title: "Production deployment"
+description: "Checklist and best practices for running HTTPower in production with reliability patterns enabled."
+---
+
+This guide covers configuration, monitoring, and operational patterns for running HTTPower reliably in production.
+
+## Pre-deployment checklist
+
+Complete these steps before shipping to production.
+
+<Steps>
+  <Step title="Configure circuit breaker thresholds">
+    Set `failure_threshold` and `timeout` based on your service's SLAs. Document which endpoints use which `circuit_breaker_key`.
+  </Step>
+  <Step title="Set rate limits per external service">
+    Review each external API's documented rate limits and configure HTTPower below those limits. Choose the right strategy: `:wait` for background jobs, `:error` for user-facing requests.
+  </Step>
+  <Step title="Enable sanitized logging">
+    Attach `HTTPower.Logger` in your `Application.start/2` with comprehensive `sanitize_headers` and `sanitize_body_fields` to prevent leaking credentials or PCI data.
+  </Step>
+  <Step title="Disable test mode">
+    Confirm `config :httpower, test_mode: false` in `config/prod.exs`. Test mode is `false` by default but is worth making explicit.
+  </Step>
+  <Step title="Configure timeouts">
+    Set request timeouts appropriate for each service. Avoid leaving them at defaults for endpoints with variable latency.
+  </Step>
+  <Step title="Size Finch connection pools">
+    If using the default Req adapter, tune Finch pool size to match your concurrency requirements.
+  </Step>
+  <Step title="Test failure scenarios">
+    Verify circuit breaker opens under failure, that fallback code paths work, and that rate limit errors are handled gracefully.
+  </Step>
+  <Step title="Set up monitoring and alerts">
+    Attach telemetry handlers for circuit state changes and rate limit events. Configure alerts before going live.
+  </Step>
+  <Step title="Externalize secrets">
+    API keys and other credentials must come from environment variables via `config/runtime.exs`, not hardcoded in config files.
+  </Step>
+  <Step title="Verify SSL">
+    Confirm `ssl_verify: true` (the default) is not overridden in production config.
+  </Step>
+</Steps>
+
+## Recommended production config
+
+A full `config/prod.exs` with all reliability features enabled:
+
+```elixir config/prod.exs
+config :httpower,
+  # Retry
+  max_retries: 3,
+  retry_safe: false,        # Only enable for idempotent operations
+  base_delay: 1000,
+  max_delay: 30_000,
+
+  # Circuit breaker
+  circuit_breaker: [
+    enabled: true,
+    failure_threshold: 5,
+    window_size: 10,
+    timeout: 60_000,          # 60 seconds before half-open
+    half_open_requests: 1
+  ],
+
+  # Rate limiting
+  rate_limit: [
+    enabled: true,
+    requests: 100,
+    per: :minute,
+    strategy: :wait,
+    max_wait_time: 5000       # Max 5 second wait
+  ],
+
+  # Logging
+  logging: [
+    enabled: true,
+    level: :info
+  ],
+
+  # Safety
+  test_mode: false
+```
+
+For secrets and environment-specific values, use `config/runtime.exs`:
+
+```elixir config/runtime.exs
+import Config
+
+if config_env() == :prod do
+  config :myapp, :api_client,
+    base_url: System.get_env("API_BASE_URL") || "https://api.example.com",
+    api_key: System.fetch_env!("API_KEY"),
+    timeout: String.to_integer(System.get_env("API_TIMEOUT", "30")),
+    max_retries: String.to_integer(System.get_env("API_MAX_RETRIES", "3"))
+end
+```
+
+## Circuit breaker tuning
+
+Choose settings based on your use case. You can also use the built-in profiles as a starting point.
+
+<CodeGroup>
+
+```elixir Payment gateways
+# Strict settings: correctness over speed
+# Uses the :payment_processing profile
+client = HTTPower.new(
+  base_url: "https://api.stripe.com",
+  profile: :payment_processing
+)
+
+# Equivalent manual configuration:
+circuit_breaker: [
+  enabled: true,
+  failure_threshold: 6,
+  failure_threshold_percentage: 30.0,  # Open at 30% failure rate
+  window_size: 20,
+  timeout: 30_000,
+  half_open_requests: 3
+]
+```
+
+```elixir High-volume APIs
+# Tolerant settings: throughput over strictness
+# Uses the :high_volume_api profile
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  profile: :high_volume_api
+)
+
+# Equivalent manual configuration:
+circuit_breaker: [
+  enabled: true,
+  failure_threshold: 50,
+  failure_threshold_percentage: 50.0,
+  window_size: 100,
+  timeout: 5_000,
+  half_open_requests: 10
+]
+```
+
+```elixir Microservices
+# Balanced settings: protect against cascades
+# Uses the :microservices_mesh profile
+client = HTTPower.new(
+  base_url: "http://user-service",
+  profile: :microservices_mesh
+)
+
+# Equivalent manual configuration:
+circuit_breaker: [
+  enabled: true,
+  failure_threshold: 20,
+  failure_threshold_percentage: 40.0,
+  window_size: 50,
+  timeout: 10_000,
+  half_open_requests: 5
+]
+```
+
+</CodeGroup>
+
+Use `circuit_breaker_key` to isolate circuits per service so one service's failures do not affect another:
+
+```elixir
+defmodule MyApp.StripeClient do
+  defp client do
+    HTTPower.new(
+      base_url: "https://api.stripe.com",
+      circuit_breaker: [failure_threshold: 3, timeout: 30_000],
+      circuit_breaker_key: "stripe"  # Isolated circuit
+    )
+  end
+end
+
+defmodule MyApp.GithubClient do
+  defp client do
+    HTTPower.new(
+      base_url: "https://api.github.com",
+      circuit_breaker: [failure_threshold: 5, timeout: 60_000],
+      circuit_breaker_key: "github"  # Separate isolated circuit
+    )
+  end
+end
+```
+
+## Rate limiting strategy
+
+The `strategy` option controls what happens when the rate limit is exceeded.
+
+| Strategy | Behavior | Use when |
+|----------|----------|----------|
+| `:wait` | Blocks until tokens are available (up to `max_wait_time`) | Background jobs, batch processing |
+| `:error` | Returns `{:error, :too_many_requests}` immediately | User-facing requests, latency-sensitive paths |
+
+```elixir
+# Background job processor - waiting is acceptable
+config :myapp, :batch_client,
+  rate_limit: [
+    enabled: true,
+    requests: 100,
+    per: :minute,
+    strategy: :wait,
+    max_wait_time: 10_000
+  ]
+
+# User-facing API call - fail fast
+config :myapp, :realtime_client,
+  rate_limit: [
+    enabled: true,
+    requests: 100,
+    per: :minute,
+    strategy: :error  # Caller handles the error and shows a message
+  ]
+```
+
+<Tip>
+Use `rate_limit_key` to create separate rate limit buckets per endpoint or per user. This prevents one busy endpoint from exhausting the budget for everything else.
+</Tip>
+
+## Logging setup
+
+HTTPower uses a telemetry-based logger that you attach explicitly in `Application.start/2`. Logging is opt-in.
+
+```elixir lib/my_app/application.ex
+def start(_type, _args) do
+  # Attach the HTTPower logger before starting the supervision tree
+  HTTPower.Logger.attach(
+    level: :info,
+    log_headers: true,
+    log_body: true,
+    sanitize_headers: [
+      "authorization", "api-key", "x-api-key",
+      "cookie", "set-cookie", "x-auth-token"
+    ],
+    sanitize_body_fields: [
+      # Auth
+      "password", "secret", "token", "api_key",
+      # Financial (PCI)
+      "credit_card", "card_number", "cvv", "cvc",
+      "account_number", "routing_number",
+      # Personal
+      "ssn", "tax_id", "drivers_license"
+    ]
+  )
+
+  children = [
+    # ...
+  ]
+
+  Supervisor.start_link(children, strategy: :one_for_one)
+end
+```
+
+<Note>
+The `sanitize_headers` and `sanitize_body_fields` lists are **additive**. They extend the built-in defaults, which already include `authorization`, `password`, `credit_card`, `cvv`, `api_key`, `token`, and `ssn` among others.
+</Note>
+
+All log entries include structured metadata accessible via `Logger.metadata/0`. This enables precise queries in production log aggregators:
+
+```
+# Find slow requests (Datadog / Splunk / ELK)
+httpower_duration_ms:>1000 AND httpower_event:response
+
+# Alert on 5xx errors
+httpower_status:>=500 AND httpower_method:post
+
+# Trace a specific request
+httpower_correlation_id:"req_abc123"
+```
+
+Available metadata fields: `httpower_correlation_id`, `httpower_event`, `httpower_method`, `httpower_url`, `httpower_status`, `httpower_duration_ms`.
+
+## Finch connection pool sizing
+
+HTTPower's default Req adapter uses Finch for connection pooling. The defaults work for most applications, but high-concurrency services should tune them:
+
+```elixir config/prod.exs
+config :req, finch: [
+  pools: %{
+    # Default pool for all hosts
+    default: [size: 25, count: 5],
+
+    # Dedicated pool for a high-traffic host
+    "https://api.stripe.com": [size: 10, count: 2]
+  }
+]
+```
+
+`size` is the number of connections per pool process. `count` is the number of pool processes. Total connections per host = `size * count`.
+
+<Tip>
+Start with the defaults and increase only if you see connection queue latency in your metrics. Over-provisioning connections wastes file descriptors.
+</Tip>
+
+## Telemetry integration
+
+HTTPower emits telemetry events you can attach handlers to for custom metrics, dashboards, and alerts.
+
+### Monitoring circuit breaker state
+
+Poll circuit state on a schedule (via a GenServer, Quantum, or Oban job) and emit metrics:
+
+```elixir lib/my_app/circuit_breaker_monitor.ex
+defmodule MyApp.CircuitBreakerMonitor do
+  require Logger
+
+  @circuits ["stripe", "github", "user_service", "order_service"]
+
+  def check_circuits do
+    Enum.each(@circuits, fn key ->
+      case HTTPower.Middleware.CircuitBreaker.get_state(key) do
+        :open ->
+          Logger.warning("Circuit OPEN: #{key}")
+          :telemetry.execute([:myapp, :circuit_breaker, :open], %{count: 1}, %{key: key})
+
+        :half_open ->
+          Logger.info("Circuit HALF-OPEN: #{key}")
+
+        state when state in [:closed, nil] ->
+          :ok
+      end
+    end)
+  end
+end
+```
+
+### Tracking rate limit events
+
+```elixir
+def fetch_data do
+  result = HTTPower.get(client(), "/data")
+
+  case result do
+    {:error, %{reason: :too_many_requests}} ->
+      :telemetry.execute(
+        [:myapp, :http, :rate_limit_exceeded],
+        %{count: 1},
+        %{service: "my_api"}
+      )
+    _ ->
+      :ok
+  end
+
+  result
+end
+```
+
+### What to monitor in production
+
+- **Circuit state changes** — alert when any circuit opens
+- **Rate limit exceeded rate** — spike indicates traffic surge or misconfiguration
+- **Retry count per request** — high values indicate a struggling dependency
+- **Request duration (p95, p99)** — HTTPower logs duration per request
+- **ETS table sizes** — `ets.info(:httpower_rate_limiter)` and `:httpower_circuit_breaker`
+
+## Health check patterns
+
+Expose HTTPower's reliability state in your health endpoint:
+
+```elixir lib/my_app_web/health_controller.ex
+defmodule MyAppWeb.HealthController do
+  use MyAppWeb, :controller
+
+  @circuits ["stripe", "github"]
+
+  def index(conn, _params) do
+    circuit_health =
+      Map.new(@circuits, fn key ->
+        {key, HTTPower.Middleware.CircuitBreaker.get_state(key)}
+      end)
+
+    all_healthy? = Enum.all?(circuit_health, fn {_k, v} -> v in [:closed, nil] end)
+
+    status = if all_healthy?, do: :ok, else: :service_unavailable
+
+    conn
+    |> put_status(status)
+    |> json(%{status: status, circuits: circuit_health})
+  end
+end
+```
+
+## Graceful degradation
+
+Handle circuit open and rate limit errors explicitly so users get meaningful responses:
+
+```elixir
+defmodule MyApp.PaymentService do
+  def charge_customer(amount) do
+    case HTTPower.post(client(), "/v1/charges", body: Jason.encode!(amount)) do
+      {:ok, response} ->
+        {:ok, response}
+
+      {:error, %{reason: :service_unavailable}} ->
+        # Circuit is open — payment service is down
+        Logger.error("Payment service unavailable (circuit open)")
+        {:error, :service_unavailable}
+
+      {:error, %{reason: :too_many_requests}} ->
+        Logger.warning("Payment service rate limited")
+        {:error, :rate_limited}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+end
+```
+
+## Multi-node considerations
+
+HTTPower's rate limiter and circuit breaker are **per-node**, stored in local ETS.
+
+| Feature | Per-node behavior |
+|---------|-------------------|
+| Rate limiting | Each node has independent buckets. Total throughput = `requests * num_nodes`. |
+| Circuit breaker | Each node has independent state. A circuit can be open on one node and closed on another. |
+
+For most applications, per-node isolation is the correct behavior — it means a single slow node does not cascade failures across the cluster.
+
+<Warning>
+If you need **strict global rate limits** (e.g., to stay within a third-party API's total quota across all nodes), HTTPower's built-in rate limiter is not sufficient. You will need a centralized store such as Redis.
+</Warning>
+
+Adjust per-node limits to account for the total number of nodes:
+
+```elixir
+# If you have 3 nodes and want a global cap of 300 req/min:
+config :httpower,
+  rate_limit: [
+    enabled: true,
+    requests: 100,   # 100/node × 3 nodes = 300 total
+    per: :minute
+  ]
+```
+
+## Common production pitfalls
+
+<AccordionGroup>
+  <Accordion title="Circuit keeps opening unexpectedly">
+    **Debug:**
+    ```elixir
+    # Check current state
+    HTTPower.Middleware.CircuitBreaker.get_state("my_service")
+
+    # Look for failure patterns in logs
+    # [HTTPower] [req_*] ← 500 or ← timeout
+    ```
+    **Solutions:**
+    - Increase `failure_threshold` if the service has frequent transient failures
+    - Increase `window_size` to smooth out traffic spikes
+    - Reduce `timeout` if the service recovers quickly
+    - Verify the external service is not actually degraded
+  </Accordion>
+
+  <Accordion title="Rate limiting too aggressive">
+    **Debug:**
+    ```elixir
+    Application.get_env(:httpower, :rate_limit)
+    ```
+    **Solutions:**
+    - Increase `requests` or use a larger `per` window
+    - Switch to `:wait` strategy instead of `:error`
+    - Use `rate_limit_key` to isolate different endpoints into separate buckets
+    - Implement per-user rate limiting at the application layer
+  </Accordion>
+
+  <Accordion title="High memory usage">
+    **Debug:**
+    ```elixir
+    :ets.info(:httpower_rate_limiter)
+    :ets.info(:httpower_circuit_breaker)
+    ```
+    **Notes:**
+    - The rate limiter automatically cleans up buckets that have been inactive for 5 minutes
+    - The circuit breaker tracks only the last `window_size` requests
+    - Typical memory footprint is well under 10 MB
+  </Accordion>
+
+  <Accordion title="Test mode active in production">
+    Test mode blocks all real HTTP requests. Confirm it is disabled:
+    ```elixir
+    # config/prod.exs
+    config :httpower, test_mode: false
+    ```
+    Never set `test_mode: true` outside of `config/test.exs`.
+  </Accordion>
+
+  <Accordion title="Double-retrying when using Tesla.Middleware.Retry">
+    Remove `Tesla.Middleware.Retry` from your Tesla pipeline when using HTTPower's retry. Both retrying independently results in far more attempts than intended.
+  </Accordion>
+
+  <Accordion title="Supervision tree not starting">
+    Verify HTTPower processes are running:
+    ```elixir
+    Process.whereis(HTTPower.Middleware.RateLimiter)
+    Process.whereis(HTTPower.Middleware.CircuitBreaker)
+    Supervisor.which_children(HTTPower.Supervisor)
+    ```
+    HTTPower starts its own supervision tree automatically when added to `mix.exs`. No manual supervision setup is required.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/configuration/overview">
+    Complete reference for all HTTPower options.
+  </Card>
+  <Card title="Migrating from Tesla" icon="bolt" href="/guides/migrating-from-tesla">
+    Add reliability features to existing Tesla applications.
+  </Card>
+  <Card title="Migrating from Req" icon="bolt" href="/guides/migrating-from-req">
+    Add reliability features to existing Req applications.
+  </Card>
+</CardGroup>

@@ -1,97 +1,82 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "HTTPower"
+description: "Production-ready HTTP client for Elixir with circuit breaker, rate limiting, PCI-compliant logging, and smart retries built in."
+mode: "custom"
 ---
 
-## Setting up
+<div style={{background: "linear-gradient(135deg, #94cb04 0%, #6fa003 100%)", borderRadius: "12px", padding: "48px 40px", marginBottom: "32px", color: "#fff"}}>
+  <div style={{fontSize: "14px", fontWeight: "600", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: "16px", opacity: 0.85}}>Elixir HTTP Client Library</div>
+  <h1 style={{fontSize: "48px", fontWeight: "700", lineHeight: "1.1", marginBottom: "16px", color: "#fff"}}>HTTP requests that never give up ⚡</h1>
+  <p style={{fontSize: "18px", lineHeight: "1.6", marginBottom: "32px", opacity: 0.9, maxWidth: "600px"}}>
+    HTTPower adds production reliability to your HTTP calls — circuit breaker, rate limiting, smart retries, and PCI-compliant logging — without changing how you write code.
+  </p>
+  <div style={{display: "flex", gap: "12px", flexWrap: "wrap"}}>
+    <a href="/quickstart" style={{background: "#fff", color: "#1a1a1a", padding: "12px 24px", borderRadius: "6px", fontWeight: "600", textDecoration: "none", fontSize: "15px"}}>Get started →</a>
+    <a href="/introduction" style={{background: "rgba(255,255,255,0.15)", color: "#fff", padding: "12px 24px", borderRadius: "6px", fontWeight: "600", textDecoration: "none", fontSize: "15px", border: "1px solid rgba(255,255,255,0.3)"}}>Learn more</a>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={3}>
+  <Card title="Circuit breaker" icon="shield-halved" href="/features/circuit-breaker">
+    Automatic failure detection and recovery. Prevent cascading failures in microservices and API integrations.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Rate limiting" icon="gauge-high" href="/features/rate-limiting">
+    Token bucket algorithm with `:wait` and `:error` strategies. Per-endpoint configuration and header parsing.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="PCI-compliant logging" icon="lock" href="/features/pci-logging">
+    Auto-redact credit cards, CVVs, API keys, and passwords. Structured metadata for log aggregation.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Smart retries" icon="arrows-rotate" href="/features/retries">
+    Exponential backoff with jitter. Respects Retry-After headers. Configurable per request or globally.
   </Card>
-</Columns>
+  <Card title="Deduplication" icon="copy" href="/features/deduplication">
+    Prevent duplicate charges from double-clicks. In-flight request sharing across concurrent calls.
+  </Card>
+  <Card title="Telemetry" icon="chart-line" href="/features/telemetry">
+    Comprehensive events for Prometheus, OpenTelemetry, and LiveDashboard out of the box.
+  </Card>
+</CardGroup>
 
-## Create beautiful pages
+## Install in 30 seconds
 
-Everything you need to create world-class documentation.
+```elixir mix.exs
+def deps do
+  [
+    {:httpower, "~> 0.20.0"},
+    {:finch, ">= 0.19.0"}   # Recommended adapter — or use :req or :tesla
+  ]
+end
+```
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+```elixir lib/my_app/application.ex
+def start(_type, _args) do
+  HTTPower.Logger.attach()  # Enable PCI-compliant logging
 
-## Need inspiration?
+  children = [
+    {Finch, name: HTTPower.Finch}
+  ]
+  Supervisor.start_link(children, strategy: :one_for_one)
+end
+```
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+```elixir
+# Make your first request
+{:ok, response} = HTTPower.get("https://api.example.com/users")
+IO.inspect(response.status)  # 200
+IO.inspect(response.body)    # %{"users" => [...]}
+```
+
+<CardGroup cols={2}>
+  <Card title="Read the quickstart" icon="rocket" href="/quickstart">
+    Step-by-step guide to get HTTPower working in your application.
+  </Card>
+  <Card title="Choose your adapter" icon="plug" href="/adapters">
+    Finch (default), Req, or Tesla — learn which adapter fits your project.
+  </Card>
+  <Card title="Configuration reference" icon="sliders" href="/configuration/overview">
+    All options, precedence rules, and environment-specific settings.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/httpower">
+    Complete function signatures and type documentation.
+  </Card>
+</CardGroup>

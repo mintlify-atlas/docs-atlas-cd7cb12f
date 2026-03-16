@@ -1,0 +1,129 @@
+---
+title: "HTTPower.Error"
+description: "Struct representing a transport or middleware error."
+---
+
+`HTTPower.Error` is returned inside `{:error, error}` tuples when a request cannot be completed due to a network failure or middleware rejection. It is never raised as an exception.
+
+<Note>
+HTTPower **never raises exceptions** for HTTP operations. Configuration errors (such as an unknown `:profile` passed to `new/1`) raise `ArgumentError` at client construction time, following standard Elixir conventions. All runtime failures are returned as `{:error, %HTTPower.Error{}}`.
+</Note>
+
+## Struct definition
+
+```elixir
+@type reason ::
+        atom()
+        | {:http_status, integer(), HTTPower.Response.t()}
+        | {:feature_error, module(), term()}
+
+@type t :: %HTTPower.Error{
+        reason: reason(),
+        message: String.t()
+      }
+```
+
+## Fields
+
+<ResponseField name="reason" type="atom | tuple" required>
+  Machine-readable error identifier. See [Error reasons](#error-reasons) for the full list of atoms. Can also be a compound tuple for HTTP status errors or middleware failures.
+</ResponseField>
+
+<ResponseField name="message" type="String.t" required>
+  Human-readable description of the error, suitable for logging.
+</ResponseField>
+
+## Error reasons
+
+### Transport errors
+
+| Reason | Message | Description |
+|--------|---------|-------------|
+| `:timeout` | `"Request timeout"` | The request exceeded the configured timeout. |
+| `:econnrefused` | `"Connection refused"` | The server actively refused the connection. |
+| `:econnreset` | `"Connection reset"` | The connection was reset by the peer. Safe to retry if `retry_safe: true`. |
+| `:closed` | `"Connection closed"` | The connection was closed before a response was received. |
+| `:nxdomain` | `"Domain not found"` | DNS resolution failed for the host. |
+| `:invalid_url` | *(varies)* | The URL does not use `http` or `https`, or has no valid host. |
+
+### Middleware errors
+
+| Reason | Message | Description |
+|--------|---------|-------------|
+| `:network_blocked` | `"Network access blocked in test mode"` | A real HTTP request was attempted while `:test_mode` is enabled. |
+| `:service_unavailable` | `"Service unavailable"` | The circuit breaker is open and rejecting requests. |
+| `:too_many_requests` | `"Too many requests"` | The rate limiter rejected the request before it was sent. |
+| `:dedup_timeout` | `"Request deduplication timeout"` | A deduplicated request waited too long for the in-flight response. |
+
+### Compound reasons
+
+<ResponseField name="{:http_status, status, response}" type="tuple">
+  Returned when the middleware pipeline treats a specific HTTP status code as an error. Contains the integer status code and the full `HTTPower.Response` struct.
+</ResponseField>
+
+<ResponseField name="{:feature_error, module, exception}" type="tuple">
+  Returned when a middleware module raises an unexpected exception. Contains the middleware module atom and the original exception.
+</ResponseField>
+
+## Error handling examples
+
+### Basic case expression
+
+```elixir
+case HTTPower.get("https://api.example.com/users") do
+  {:ok, %HTTPower.Response{status: status} = response} when status in 200..299 ->
+    {:ok, response.body}
+
+  {:ok, %HTTPower.Response{status: status}} ->
+    {:error, {:http_error, status}}
+
+  {:error, %HTTPower.Error{reason: :timeout}} ->
+    {:error, :request_timed_out}
+
+  {:error, %HTTPower.Error{reason: :econnrefused}} ->
+    {:error, :service_down}
+
+  {:error, %HTTPower.Error{reason: :network_blocked}} ->
+    # Unexpected real HTTP call in test environment
+    raise "Unmocked HTTP request detected"
+
+  {:error, %HTTPower.Error{reason: reason, message: message}} ->
+    # Catch-all for other transport errors
+    Logger.error("HTTP request failed", reason: reason, message: message)
+    {:error, :request_failed}
+end
+```
+
+### Handling circuit breaker rejections
+
+```elixir
+case HTTPower.get("https://api.example.com/data",
+       circuit_breaker: [enabled: true]
+     ) do
+  {:ok, response} ->
+    process(response)
+
+  {:error, %HTTPower.Error{reason: :service_unavailable}} ->
+    # Circuit is open — serve from cache or return a fallback
+    {:ok, cached_data()}
+
+  {:error, %HTTPower.Error{reason: reason}} ->
+    {:error, reason}
+end
+```
+
+### Logging errors
+
+```elixir
+defp handle_response({:error, %HTTPower.Error{reason: reason, message: message}}) do
+  Logger.warning("External request failed",
+    error_reason: inspect(reason),
+    error_message: message
+  )
+  {:error, :external_service_error}
+end
+```
+
+<Tip>
+Use `reason` for programmatic branching and `message` for log output. Avoid pattern matching on `message` strings, as they may change between releases.
+</Tip>

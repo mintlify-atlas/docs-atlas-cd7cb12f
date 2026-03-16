@@ -1,0 +1,104 @@
+---
+title: "HTTPower.Response"
+description: "Struct representing a successful HTTP response."
+---
+
+`HTTPower.Response` is returned inside `{:ok, response}` tuples from all HTTP method calls. It abstracts away the underlying HTTP adapter and provides a consistent interface regardless of which adapter is in use.
+
+<Note>
+Receiving `{:ok, %HTTPower.Response{}}` means the server responded. It does **not** mean the request succeeded — 4xx and 5xx responses are also wrapped in `{:ok, ...}`. Always check `response.status`.
+</Note>
+
+## Struct definition
+
+```elixir
+@type t :: %HTTPower.Response{
+        status: integer(),
+        headers: %{optional(String.t()) => [String.t()]},
+        body: term()
+      }
+```
+
+## Fields
+
+<ResponseField name="status" type="integer" required>
+  HTTP status code returned by the server (e.g., `200`, `404`, `500`).
+</ResponseField>
+
+<ResponseField name="headers" type="map">
+  Response headers as a map of string keys to lists of string values.
+
+  ```elixir
+  # Example shape
+  %{
+    "content-type" => ["application/json; charset=utf-8"],
+    "x-request-id" => ["abc123"]
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="body" type="term">
+  Decoded response body. For JSON responses this is typically a map or list. For other content types it is a string.
+</ResponseField>
+
+## Pattern matching on status
+
+The most common pattern is to match on the status code in a `case` expression:
+
+```elixir
+case HTTPower.get("https://api.example.com/users") do
+  {:ok, %HTTPower.Response{status: status, body: body}} when status in 200..299 ->
+    # Handle success
+    IO.inspect(body)
+
+  {:ok, %HTTPower.Response{status: 404}} ->
+    # Resource not found
+    {:error, :not_found}
+
+  {:ok, %HTTPower.Response{status: 429}} ->
+    # Rate limited by the server
+    {:error, :rate_limited}
+
+  {:ok, %HTTPower.Response{status: status}} when status >= 500 ->
+    # Server error after retries exhausted
+    {:error, :server_error}
+
+  {:error, %HTTPower.Error{} = error} ->
+    # Transport-level failure
+    {:error, error}
+end
+```
+
+## Accessing body fields
+
+When the response body is a decoded JSON object, access fields directly on the map:
+
+```elixir
+{:ok, %HTTPower.Response{status: 200, body: body}} =
+  HTTPower.get("https://api.example.com/users/1")
+
+# JSON body is decoded to a map with string keys
+user_name = body["name"]
+user_email = body["email"]
+```
+
+When the body is a list (e.g., a JSON array):
+
+```elixir
+{:ok, %HTTPower.Response{status: 200, body: users}} =
+  HTTPower.get("https://api.example.com/users")
+
+Enum.each(users, fn user -> IO.inspect(user["name"]) end)
+```
+
+## Reading headers
+
+```elixir
+{:ok, response} = HTTPower.get("https://api.example.com/resource")
+
+content_type = response.headers["content-type"]
+# => ["application/json; charset=utf-8"]
+
+# Headers may have multiple values; get the first
+first_value = response.headers |> Map.get("content-type", []) |> List.first()
+```

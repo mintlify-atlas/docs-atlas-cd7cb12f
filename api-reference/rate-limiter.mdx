@@ -1,0 +1,167 @@
+---
+title: 'HTTPower.Middleware.RateLimiter'
+description: 'Rate limiter bucket management and header-based synchronization.'
+---
+
+`HTTPower.Middleware.RateLimiter` implements a token bucket rate limiter backed by an ETS table. The module provides two public functions for synchronizing the local bucket with server-reported limits and for inspecting current bucket state.
+
+<Note>
+The rate limiter runs as a `GenServer`. It must be started in your supervision tree. The middleware's pipeline integration (automatic token consumption per request) is configured separately via the `:rate_limit` application config or per-client options.
+</Note>
+
+## Functions
+
+### `update_from_headers/2`
+
+Synchronizes the local token bucket with rate limit information parsed from an HTTP response. This allows the bucket to reflect the server's actual state rather than relying solely on local counting.
+
+```elixir
+@spec update_from_headers(bucket_key :: String.t(), rate_limit_info :: map()) :: :ok
+```
+
+<ParamField path="bucket_key" type="string" required>
+  The key identifying the bucket to update. Typically a hostname (e.g. `"api.github.com"`) matching the key used during requests.
+</ParamField>
+
+<ParamField path="rate_limit_info" type="map" required>
+  A map containing parsed rate limit information. The `:remaining` field is used to set the current token count.
+
+  <Expandable title="rate_limit_info fields">
+    <ParamField path="remaining" type="integer" required>
+      Number of requests the server reports as remaining in the current window. This value is written directly into the bucket as the current token count.
+    </ParamField>
+    <ParamField path="limit" type="integer">
+      Total request limit per window reported by the server.
+    </ParamField>
+    <ParamField path="reset_at" type="DateTime">
+      UTC datetime when the rate limit window resets.
+    </ParamField>
+    <ParamField path="format" type="atom">
+      Header format the info was parsed from. One of `:github`, `:rfc`, `:stripe`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns** `:ok`.
+
+<Tip>
+Use `HTTPower.RateLimitHeaders.parse/1` to produce the `rate_limit_info` map from raw response headers before passing it to this function.
+</Tip>
+
+```elixir
+{:ok, response} = HTTPower.get("https://api.github.com/user")
+
+case HTTPower.RateLimitHeaders.parse(response.headers) do
+  {:ok, rate_limit_info} ->
+    HTTPower.Middleware.RateLimiter.update_from_headers(
+      "api.github.com",
+      rate_limit_info
+    )
+
+  {:error, :not_found} ->
+    :ok
+end
+```
+
+---
+
+### `get_info/1`
+
+Returns the current state of a rate limit bucket, including the token count and the timestamp of the last refill.
+
+```elixir
+@spec get_info(bucket_key :: String.t()) :: map() | nil
+```
+
+<ParamField path="bucket_key" type="string" required>
+  The key identifying the bucket to inspect.
+</ParamField>
+
+**Returns** a map when the bucket exists, or `nil` if no bucket has been created for the given key.
+
+<ResponseField name="current_tokens" type="float">
+  The number of tokens currently available in the bucket. Each request consumes `1.0` token. Tokens refill continuously over time up to the configured maximum.
+</ResponseField>
+
+<ResponseField name="last_refill_ms" type="integer">
+  Monotonic timestamp (in milliseconds) of when the bucket's token count was last updated. Used internally to calculate elapsed time and compute the refill amount.
+</ResponseField>
+
+```elixir
+info = HTTPower.Middleware.RateLimiter.get_info("api.github.com")
+# => %{
+#      current_tokens: 55.0,
+#      last_refill_ms: 1234567890
+#    }
+
+case info do
+  nil ->
+    IO.puts("No bucket exists yet for this key")
+
+  %{current_tokens: tokens} when tokens < 5.0 ->
+    IO.puts("Running low: #{tokens} tokens remaining")
+
+  %{current_tokens: tokens} ->
+    IO.puts("#{tokens} tokens available")
+end
+```
+
+---
+
+## Configuration
+
+<CodeGroup>
+
+```elixir global config
+config :httpower, :rate_limit,
+  enabled: true,
+  requests: 100,
+  per: :second,       # :second | :minute | :hour
+  strategy: :wait,    # :wait | :error
+  max_wait_time: 5000,
+  adaptive: true
+```
+
+```elixir per-client config
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  rate_limit: [requests: 50, per: :minute]
+)
+```
+
+```elixir custom bucket key
+HTTPower.get("https://api.example.com/users",
+  rate_limit_key: "api.example.com"
+)
+```
+
+</CodeGroup>
+
+## Adaptive rate limiting
+
+When `adaptive: true` is set, the rate limiter automatically reduces throughput based on the current circuit breaker state:
+
+| Circuit state | Effective rate |
+|---------------|----------------|
+| `:closed` (healthy) | 100% — full speed |
+| `:half_open` (recovering) | 50% — conservative |
+| `:open` (down) | 10% — minimal health checks |
+
+This coordination prevents overwhelming a recovering service with full traffic immediately after it comes back up.
+
+## Header synchronization example
+
+```elixir
+defmodule MyApp.GitHubClient do
+  def fetch_user(username) do
+    {:ok, response} = HTTPower.get("https://api.github.com/users/#{username}")
+
+    # Sync local bucket with server's reported rate limit state
+    with {:ok, info} <- HTTPower.RateLimitHeaders.parse(response.headers) do
+      HTTPower.Middleware.RateLimiter.update_from_headers("api.github.com", info)
+    end
+
+    {:ok, response}
+  end
+end
+```

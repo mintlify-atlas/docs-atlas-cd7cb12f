@@ -1,0 +1,240 @@
+---
+title: 'HTTPower.Test'
+description: 'Adapter-agnostic test helpers for mocking HTTP requests.'
+---
+
+`HTTPower.Test` provides a testing interface that works independently of which HTTP adapter (Req, Tesla) is installed. It lets you stub HTTP requests using a `Plug.Conn`-based callback, with built-in helpers for constructing JSON, HTML, and text responses.
+
+<Note>
+Plug must be added as a test dependency. HTTPower.Test will raise a clear error at runtime if `Plug.Conn` is not available.
+
+```elixir
+# mix.exs
+defp deps do
+  [
+    {:httpower, "~> 0.19"},
+    {:plug, "~> 1.15", only: :test}
+  ]
+end
+```
+</Note>
+
+## Functions
+
+### `setup/0`
+
+Registers the current test process as an HTTP mock owner. Must be called in your `setup` block before any calls to `stub/1`. Automatically cleans up all registered stubs when the test exits.
+
+```elixir
+def setup() :: :ok
+```
+
+**Returns** `:ok`.
+
+```elixir
+setup do
+  HTTPower.Test.setup()
+end
+```
+
+---
+
+### `stub/1`
+
+Registers a function that handles all HTTP requests made during the test. The function receives a `Plug.Conn` struct and must return a `Plug.Conn` with the response populated using `json/2`, `html/2`, `text/2`, or `transport_error/2`.
+
+Raises if `setup/0` has not been called first.
+
+```elixir
+def stub(fun :: (Plug.Conn.t() -> Plug.Conn.t())) :: :ok
+```
+
+<ParamField path="fun" type="function" required>
+  A one-arity function that receives a `Plug.Conn` and returns a `Plug.Conn` with the response set. Inspect `conn.method` and `conn.request_path` to route to different responses.
+</ParamField>
+
+**Returns** `:ok`.
+
+```elixir
+HTTPower.Test.stub(fn conn ->
+  case {conn.method, conn.request_path} do
+    {"GET", "/users"} ->
+      HTTPower.Test.json(conn, %{users: ["alice", "bob"]})
+
+    {"POST", "/users"} ->
+      HTTPower.Test.json(conn, %{created: true}, status: 201)
+
+    _ ->
+      HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+  end
+end)
+```
+
+---
+
+### `json/2` and `json/3`
+
+Sets a JSON response on the `Plug.Conn`. Encodes `data` with `Jason.encode!/1` and sets the `Content-Type` to `application/json; charset=utf-8`.
+
+```elixir
+def json(conn :: Plug.Conn.t(), data :: term(), opts :: keyword()) :: Plug.Conn.t()
+```
+
+<ParamField path="conn" type="Plug.Conn" required>
+  The connection struct received in the stub function.
+</ParamField>
+
+<ParamField path="data" type="term" required>
+  Any JSON-serializable value (map, list, string, number, boolean, nil).
+</ParamField>
+
+<ParamField path="opts" type="keyword">
+  <Expandable title="options">
+    <ParamField path="status" type="integer" default="200">
+      HTTP status code to return.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns** a `Plug.Conn` with the response set.
+
+```elixir
+# 200 OK
+HTTPower.Test.json(conn, %{id: 1, name: "Alice"})
+
+# 201 Created
+HTTPower.Test.json(conn, %{created: true}, status: 201)
+
+# 404 Not Found
+HTTPower.Test.json(conn, %{error: "not found"}, status: 404)
+```
+
+---
+
+### `allow/1` and `allow/2`
+
+Allows a pre-existing process (e.g. a `GenServer`) to use the mock registered by the test process. Not needed for processes spawned from within the test — those automatically inherit the mock via the `$callers` chain.
+
+```elixir
+def allow(pid :: pid(), owner :: pid()) :: :ok
+```
+
+<ParamField path="pid" type="pid" required>
+  The process to grant mock access to.
+</ParamField>
+
+<ParamField path="owner" type="pid" default="self()">
+  The owning test process whose mock should be shared. Defaults to `self()`.
+</ParamField>
+
+Allowances are transitive: if a `GenServer` is allowed and it spawns a `Task`, the `Task` also sees the mock.
+
+```elixir
+setup do
+  HTTPower.Test.setup()
+  HTTPower.Test.allow(Process.whereis(MyApp.HttpWorker))
+end
+```
+
+---
+
+## Full test module example
+
+```elixir
+# test/test_helper.exs
+ExUnit.start()
+```
+
+```elixir
+# test/my_app/api_client_test.exs
+defmodule MyApp.ApiClientTest do
+  use ExUnit.Case
+
+  # Call setup/0 in every test
+  setup do
+    HTTPower.Test.setup()
+  end
+
+  test "fetches a list of users" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.json(conn, %{users: ["alice", "bob"]})
+    end)
+
+    {:ok, response} = HTTPower.get("https://api.example.com/users")
+
+    assert response.status == 200
+    assert response.body == %{"users" => ["alice", "bob"]}
+  end
+
+  test "handles a 422 error response" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.json(
+        conn,
+        %{error: "unprocessable entity"},
+        status: 422
+      )
+    end)
+
+    {:ok, response} = HTTPower.post("https://api.example.com/users",
+      body: %{name: ""}
+    )
+
+    assert response.status == 422
+    assert response.body["error"] == "unprocessable entity"
+  end
+
+  test "simulates a network timeout" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.transport_error(conn, :timeout)
+    end)
+
+    {:error, error} = HTTPower.get("https://api.example.com/slow")
+
+    assert error.reason == :test_transport_error
+    assert error.message =~ "timeout"
+  end
+
+  test "network is blocked when no stub is registered" do
+    # setup/0 registers the test process but no stub is set yet.
+    # Calling HTTPower without a stub raises a clear error.
+    assert_raise RuntimeError, ~r/No stub registered/, fn ->
+      HTTPower.get("https://api.example.com/users")
+    end
+  end
+end
+```
+
+## Cross-process mocking
+
+```elixir
+defmodule MyApp.WorkerTest do
+  use ExUnit.Case
+
+  setup do
+    HTTPower.Test.setup()
+    # Allow the pre-started GenServer to see test mocks
+    HTTPower.Test.allow(Process.whereis(MyApp.HttpWorker))
+  end
+
+  test "worker uses the registered stub" do
+    HTTPower.Test.stub(fn conn ->
+      HTTPower.Test.json(conn, %{ok: true})
+    end)
+
+    assert {:ok, response} = MyApp.HttpWorker.fetch()
+    assert response.body == %{"ok" => true}
+  end
+end
+```
+
+## Additional response helpers
+
+Beyond `json/2`, the following helpers are available inside stub functions:
+
+| Function | Content-Type | Notes |
+|----------|-------------|-------|
+| `HTTPower.Test.html(conn, html_string, opts)` | `text/html; charset=utf-8` | Pass raw HTML string |
+| `HTTPower.Test.text(conn, text_string, opts)` | `text/plain; charset=utf-8` | Pass raw text string |
+| `HTTPower.Test.transport_error(conn, reason)` | — | Simulates `:timeout`, `:closed`, `:econnrefused`, `:nxdomain` |
+
+All accept an optional `status: integer` keyword argument (default `200`).

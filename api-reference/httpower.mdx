@@ -1,0 +1,499 @@
+---
+title: "HTTPower"
+description: "Core module providing HTTP methods and client creation."
+---
+
+`HTTPower` is the top-level module for making HTTP requests. All functions return `{:ok, %HTTPower.Response{}}` or `{:error, %HTTPower.Error{}}` and never raise exceptions for HTTP operations.
+
+<Note>
+`{:ok, response}` means the server responded — not that the request succeeded in a business logic sense. This includes 4xx and 5xx responses. Always check `response.status` to determine the HTTP outcome.
+</Note>
+
+---
+
+## `new/1`
+
+Creates a new pre-configured client struct for reuse across multiple requests.
+
+```elixir
+@spec new(keyword()) :: HTTPower.client()
+```
+
+Raises `ArgumentError` if an unknown `:profile` is given.
+
+### Parameters
+
+<ParamField body="base_url" type="string">
+  Base URL prepended to all paths when using the client variant of HTTP methods.
+</ParamField>
+
+<ParamField body="profile" type="atom">
+  Pre-configured settings profile. One of `:payment_processing`, `:high_volume_api`, or `:microservices_mesh`. Profile settings are merged with any explicit options; explicit options take precedence.
+</ParamField>
+
+<ParamField body="timeout" type="pos_integer" default="60">
+  Request timeout in seconds.
+</ParamField>
+
+<ParamField body="max_retries" type="non_neg_integer" default="3">
+  Maximum number of retries after the initial attempt.
+</ParamField>
+
+<ParamField body="retry_safe" type="boolean" default="false">
+  Enable retries for connection resets (`:econnreset`). Useful for idempotent requests.
+</ParamField>
+
+<ParamField body="ssl_verify" type="boolean" default="true">
+  Enable SSL certificate verification.
+</ParamField>
+
+<ParamField body="proxy" type="atom | keyword" default=":system">
+  Proxy configuration. Pass `:system` to use the system proxy, or a keyword list with adapter-specific options.
+</ParamField>
+
+<ParamField body="headers" type="map" default="%{}">
+  Default request headers merged with per-request headers. Per-request headers take precedence on conflicts.
+</ParamField>
+
+<ParamField body="rate_limit" type="keyword">
+  Rate limiting options passed to the `HTTPower.Middleware.RateLimiter` middleware.
+</ParamField>
+
+<ParamField body="rate_limit_key" type="string">
+  Partition key for the rate limiter bucket.
+</ParamField>
+
+<ParamField body="circuit_breaker" type="keyword">
+  Circuit breaker options passed to the `HTTPower.Middleware.CircuitBreaker` middleware.
+</ParamField>
+
+<ParamField body="circuit_breaker_key" type="string">
+  Partition key for the circuit breaker state.
+</ParamField>
+
+<ParamField body="deduplicate" type="boolean | keyword">
+  Request deduplication. Pass `true` to enable with defaults, or a keyword list for custom options.
+</ParamField>
+
+<ParamField body="adapter" type="module | {module, term}">
+  HTTP adapter module. Defaults to auto-detecting `Finch`, `Req`, or `Tesla`. Pass `{module, config}` to supply adapter-specific configuration.
+</ParamField>
+
+### Returns
+
+A `%HTTPower{}` client struct.
+
+### Examples
+
+```elixir
+# Simple client with base URL
+client = HTTPower.new(base_url: "https://api.example.com")
+
+# Client with authentication
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  headers: %{"Authorization" => "Bearer token"},
+  timeout: 30,
+  max_retries: 5,
+  retry_safe: true
+)
+
+# Use a built-in profile
+client = HTTPower.new(
+  base_url: "https://payment-gateway.com",
+  profile: :payment_processing
+)
+
+# Profile with per-client overrides
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  profile: :high_volume_api,
+  rate_limit: [requests: 2000]
+)
+```
+
+---
+
+## Request options
+
+All HTTP method functions accept the following options. Options passed per-request override any matching options set on a client struct.
+
+<ParamField body="timeout" type="pos_integer" default="60">
+  Request timeout in seconds.
+</ParamField>
+
+<ParamField body="max_retries" type="non_neg_integer" default="3">
+  Maximum number of retries after the initial attempt.
+</ParamField>
+
+<ParamField body="retry_safe" type="boolean" default="false">
+  Enable retries for connection resets.
+</ParamField>
+
+<ParamField body="ssl_verify" type="boolean" default="true">
+  Enable SSL certificate verification.
+</ParamField>
+
+<ParamField body="proxy" type="atom | keyword" default=":system">
+  Proxy configuration.
+</ParamField>
+
+<ParamField body="headers" type="map" default="%{}">
+  Request headers. Merged with client-level headers when using a configured client.
+</ParamField>
+
+<ParamField body="body" type="String.t">
+  Request body string. Used by `post/2`, `post/3`, `put/2`, `put/3`, and `patch/2`, `patch/3`.
+</ParamField>
+
+<ParamField body="rate_limit" type="keyword">
+  Per-request rate limiting options. Merged with any application-level configuration.
+</ParamField>
+
+<ParamField body="rate_limit_key" type="string">
+  Per-request rate limiter partition key.
+</ParamField>
+
+<ParamField body="circuit_breaker" type="keyword">
+  Per-request circuit breaker options.
+</ParamField>
+
+<ParamField body="circuit_breaker_key" type="string">
+  Per-request circuit breaker partition key.
+</ParamField>
+
+<ParamField body="deduplicate" type="boolean | keyword">
+  Per-request deduplication. Pass `true` to enable with defaults.
+</ParamField>
+
+<ParamField body="adapter" type="module | {module, term}">
+  Override the HTTP adapter for this request.
+</ParamField>
+
+---
+
+## `get/2` and `get/3`
+
+Makes an HTTP GET request.
+
+<Tabs>
+  <Tab title="URL variant">
+    ```elixir
+    @spec get(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Parameters
+
+    <ParamField body="url" type="String.t" required>
+      Full URL to request.
+    </ParamField>
+
+    <ParamField body="opts" type="keyword">
+      Request options. See [Request options](#request-options).
+    </ParamField>
+
+    ### Examples
+
+    ```elixir
+    HTTPower.get("https://api.example.com/users")
+
+    HTTPower.get("https://api.example.com/users",
+      headers: %{"Authorization" => "Bearer token"}
+    )
+
+    HTTPower.get("https://api.example.com/slow-endpoint",
+      timeout: 30,
+      max_retries: 5,
+      retry_safe: true
+    )
+    ```
+  </Tab>
+  <Tab title="Client variant">
+    ```elixir
+    @spec get(HTTPower.client(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    @spec get(HTTPower.client(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Parameters
+
+    <ParamField body="client" type="HTTPower.client()" required>
+      A configured client created with `new/1`.
+    </ParamField>
+
+    <ParamField body="path" type="String.t" required>
+      Path appended to the client's `base_url`.
+    </ParamField>
+
+    <ParamField body="opts" type="keyword">
+      Per-request options. Merged with client options; per-request values take precedence.
+    </ParamField>
+
+    ### Examples
+
+    ```elixir
+    client = HTTPower.new(base_url: "https://api.example.com")
+
+    HTTPower.get(client, "/users")
+    HTTPower.get(client, "/users", headers: %{"X-Request-Id" => "abc"})
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `post/2` and `post/3`
+
+Makes an HTTP POST request.
+
+<Tabs>
+  <Tab title="URL variant">
+    ```elixir
+    @spec post(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    HTTPower.post("https://api.example.com/users", body: "name=John")
+
+    HTTPower.post("https://api.example.com/users",
+      body: Jason.encode!(%{name: "John"}),
+      headers: %{"Content-Type" => "application/json"}
+    )
+    ```
+  </Tab>
+  <Tab title="Client variant">
+    ```elixir
+    @spec post(HTTPower.client(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    @spec post(HTTPower.client(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.post(client, "/users", body: Jason.encode!(%{name: "John"}))
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `put/2` and `put/3`
+
+Makes an HTTP PUT request.
+
+<Tabs>
+  <Tab title="URL variant">
+    ```elixir
+    @spec put(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    HTTPower.put("https://api.example.com/users/1", body: "name=John")
+    ```
+  </Tab>
+  <Tab title="Client variant">
+    ```elixir
+    @spec put(HTTPower.client(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    @spec put(HTTPower.client(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.put(client, "/users/1", body: Jason.encode!(%{name: "John"}))
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `delete/2` and `delete/3`
+
+Makes an HTTP DELETE request.
+
+<Tabs>
+  <Tab title="URL variant">
+    ```elixir
+    @spec delete(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    HTTPower.delete("https://api.example.com/users/1")
+    ```
+  </Tab>
+  <Tab title="Client variant">
+    ```elixir
+    @spec delete(HTTPower.client(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    @spec delete(HTTPower.client(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.delete(client, "/users/1")
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `patch/2` and `patch/3`
+
+Makes an HTTP PATCH request.
+
+<Tabs>
+  <Tab title="URL variant">
+    ```elixir
+    @spec patch(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    HTTPower.patch("https://api.example.com/users/1", body: "name=Jane")
+    ```
+  </Tab>
+  <Tab title="Client variant">
+    ```elixir
+    @spec patch(HTTPower.client(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    @spec patch(HTTPower.client(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.patch(client, "/users/1", body: Jason.encode!(%{name: "Jane"}))
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `head/2` and `head/3`
+
+Makes an HTTP HEAD request. The response body will be empty.
+
+<Tabs>
+  <Tab title="URL variant">
+    ```elixir
+    @spec head(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    HTTPower.head("https://api.example.com/users")
+    ```
+  </Tab>
+  <Tab title="Client variant">
+    ```elixir
+    @spec head(HTTPower.client(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    @spec head(HTTPower.client(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.head(client, "/users")
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `options/2` and `options/3`
+
+Makes an HTTP OPTIONS request.
+
+<Tabs>
+  <Tab title="URL variant">
+    ```elixir
+    @spec options(String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    HTTPower.options("https://api.example.com/users")
+    ```
+  </Tab>
+  <Tab title="Client variant">
+    ```elixir
+    @spec options(HTTPower.client(), String.t()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    @spec options(HTTPower.client(), String.t(), keyword()) :: {:ok, HTTPower.Response.t()} | {:error, HTTPower.Error.t()}
+    ```
+
+    ### Examples
+
+    ```elixir
+    client = HTTPower.new(base_url: "https://api.example.com")
+    HTTPower.options(client, "/users")
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `test_mode?/0`
+
+Returns whether HTTPower is currently in test mode.
+
+```elixir
+@spec test_mode?() :: boolean()
+```
+
+In test mode, real HTTP requests are blocked unless the request includes a `:plug` option (for `Req.Test`) or an explicit `:adapter` tuple.
+
+### Returns
+
+`true` if `Application.get_env(:httpower, :test_mode)` is `true`, otherwise `false`.
+
+### Examples
+
+```elixir
+Application.put_env(:httpower, :test_mode, true)
+HTTPower.test_mode?()  # => true
+
+Application.put_env(:httpower, :test_mode, false)
+HTTPower.test_mode?()  # => false
+```
+
+<Tip>
+Set `:test_mode` in your test configuration to block accidental real HTTP calls during tests:
+
+```elixir
+# config/test.exs
+config :httpower, test_mode: true
+```
+</Tip>
+
+---
+
+## Handling responses
+
+All HTTP methods return the same tagged tuple shape:
+
+```elixir
+case HTTPower.get("https://api.example.com/users") do
+  {:ok, %{status: status}} when status in 200..299 ->
+    # Success
+
+  {:ok, %{status: status} = response} ->
+    # Server responded with non-2xx (including 5xx after retries exhausted)
+    IO.inspect(response.body)
+
+  {:error, %HTTPower.Error{reason: reason}} ->
+    # Transport error: :timeout, :econnrefused, :network_blocked, etc.
+    IO.inspect(reason)
+end
+```

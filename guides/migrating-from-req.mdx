@@ -1,0 +1,448 @@
+---
+title: "Migrating from Req"
+description: "Step-by-step guide to adding HTTPower reliability features to existing Req applications."
+---
+
+HTTPower uses Req as its default underlying adapter, which makes migration from Req straightforward. Most `Req.new()` options pass through directly. HTTPower adds circuit breaker, rate limiting, PCI-compliant logging, and enhanced retry logic on top of Req's foundation.
+
+## What changes and what stays the same
+
+| | Before | After |
+|---|---|---|
+| Underlying HTTP client | Req | Req (unchanged, still used internally) |
+| Request functions | `Req.get!/2`, `Req.post!/2` | `HTTPower.get/2`, `HTTPower.post/3` |
+| Error handling | Raises (`!` variants) or `{:ok, resp}` | Always `{:ok, response}` or `{:error, error}` — never raises |
+| Retry | `retry: :transient` | HTTPower retry (set `retry: false` to avoid doubling) |
+| Circuit breaker | None | Optional, enabled per client |
+| Rate limiting | None | Optional, enabled per client |
+| Testing | `Req.Test` | `Req.Test` still works, or use `HTTPower.Test` |
+
+## Why migrate
+
+Req is a well-designed HTTP client with built-in retry and compression. It does not have a circuit breaker, rate limiter, or structured production logging. HTTPower wraps Req and adds those features without changing how Req itself works.
+
+## Step-by-step migration
+
+<Steps>
+  <Step title="Add HTTPower to mix.exs">
+    Add the dependency alongside your existing Req entry:
+
+    ```elixir mix.exs
+    def deps do
+      [
+        {:req, "~> 0.4.0"},        # existing dependency
+        {:httpower, "~> 0.5.0"}    # add this
+      ]
+    end
+    ```
+
+    Then fetch deps:
+
+    ```bash
+    mix deps.get
+    ```
+  </Step>
+
+  <Step title="Replace Req calls with HTTPower">
+    HTTPower is the default Req adapter, so no explicit adapter configuration is needed.
+
+    <Tabs>
+      <Tab title="Before">
+        ```elixir
+        defmodule MyApp.ApiClient do
+          def fetch_users do
+            Req.get!("https://api.example.com/users")  # [!code --]
+          end
+
+          def create_user(params) do
+            Req.post!("https://api.example.com/users", json: params)  # [!code --]
+          end
+        end
+        ```
+      </Tab>
+      <Tab title="After">
+        ```elixir
+        defmodule MyApp.ApiClient do
+          def fetch_users do
+            HTTPower.get("https://api.example.com/users")  # [!code ++]
+          end
+
+          def create_user(params) do
+            HTTPower.post("https://api.example.com/users",  # [!code ++]
+              body: Jason.encode!(params),                  # [!code ++]
+              headers: %{"content-type" => "application/json"} # [!code ++]
+            )                                               # [!code ++]
+          end
+        end
+        ```
+      </Tab>
+    </Tabs>
+
+    <Note>
+      HTTPower always returns `{:ok, response}` or `{:error, error}` tuples. There are no bang (`!`) variants. Update pattern matches accordingly.
+    </Note>
+  </Step>
+
+  <Step title="Migrate Req.new() configuration">
+    If you use `Req.new()` with options, replace it with `HTTPower.new()`. Most options pass through.
+
+    <Tabs>
+      <Tab title="Before">
+        ```elixir
+        defmodule MyApp.GithubClient do
+          def client do
+            Req.new(
+              base_url: "https://api.github.com",
+              headers: [{"user-agent", "MyApp/1.0"}],
+              retry: :transient
+            )
+          end
+
+          def get_repo(owner, repo) do
+            Req.get!(client(), url: "/repos/#{owner}/#{repo}")
+          end
+        end
+        ```
+      </Tab>
+      <Tab title="After">
+        ```elixir
+        defmodule MyApp.GithubClient do
+          def client do
+            HTTPower.new(
+              base_url: "https://api.github.com",
+              headers: %{"user-agent" => "MyApp/1.0"},
+              retry: false       # Disable Req's retry; HTTPower handles retries
+            )
+          end
+
+          def get_repo(owner, repo) do
+            HTTPower.get(client(), "/repos/#{owner}/#{repo}")
+          end
+        end
+        ```
+      </Tab>
+    </Tabs>
+
+    <Warning>
+      Set `retry: false` when creating HTTPower clients. Both Req and HTTPower have retry logic; leaving both enabled will multiply the number of retry attempts.
+    </Warning>
+  </Step>
+
+  <Step title="Add HTTPower reliability features">
+    Now enable the circuit breaker, rate limiting, and retry configuration:
+
+    ```elixir
+    defmodule MyApp.GithubClient do
+      def client do
+        HTTPower.new(
+          base_url: "https://api.github.com",
+          headers: %{"user-agent" => "MyApp/1.0"},
+
+          # HTTPower retry with exponential backoff
+          max_retries: 3,
+          base_delay: 1000,
+          retry: false,  # Disable Req's retry
+
+          # Circuit breaker
+          circuit_breaker: [
+            failure_threshold: 5,
+            timeout: 60_000
+          ],
+
+          # Rate limiting (GitHub allows 60 unauthenticated req/min)
+          rate_limit: [
+            requests: 60,
+            per: :minute
+          ]
+        )
+      end
+    end
+    ```
+  </Step>
+
+  <Step title="Move reliability config to config.exs">
+    Centralize shared reliability settings so individual modules stay simple:
+
+    ```elixir config/config.exs
+    config :httpower,
+      max_retries: 3,
+      base_delay: 1000,
+      max_delay: 30_000,
+      retry_safe: false,
+      circuit_breaker: [
+        enabled: true,
+        failure_threshold: 5,
+        window_size: 10,
+        timeout: 60_000
+      ],
+      rate_limit: [
+        enabled: true,
+        requests: 100,
+        per: :minute,
+        strategy: :wait
+      ],
+      logging: [
+        enabled: true,
+        level: :info
+      ]
+    ```
+
+    Your client module then becomes:
+
+    ```elixir
+    defmodule MyApp.GithubClient do
+      def client do
+        HTTPower.new(
+          base_url: "https://api.github.com",
+          headers: %{"user-agent" => "MyApp/1.0"},
+          retry: false
+        )
+      end
+    end
+    ```
+  </Step>
+
+  <Step title="Update tests">
+    HTTPower is compatible with `Req.Test`. You can keep existing Req.Test stubs or switch to `HTTPower.Test`.
+
+    <Tabs>
+      <Tab title="Req.Test (still works)">
+        ```elixir
+        # test_helper.exs
+        Application.put_env(:httpower, :test_mode, true)
+
+        # your_test.exs
+        test "fetches users" do
+          Req.Test.stub(HTTPower, fn conn ->
+            Req.Test.json(conn, %{"users" => []})
+          end)
+
+          assert {:ok, %{status: 200}} = HTTPower.get("/users",
+            plug: {Req.Test, HTTPower}
+          )
+        end
+        ```
+      </Tab>
+      <Tab title="HTTPower.Test">
+        ```elixir
+        # test_helper.exs
+        Application.put_env(:httpower, :test_mode, true)
+
+        # your_test.exs
+        test "fetches users" do
+          HTTPower.Test.stub(fn conn ->
+            Plug.Conn.resp(conn, 200, Jason.encode!(%{"users" => []}))
+          end)
+
+          assert {:ok, %{status: 200}} = MyApp.ApiClient.list_users()
+        end
+        ```
+
+        `HTTPower.Test` works with any adapter, so tests remain valid if you later swap to a different backend.
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+## Req options pass-through
+
+HTTPower passes most Req options through to the underlying Req request:
+
+```elixir
+HTTPower.get("https://api.example.com",
+  # HTTPower options
+  max_retries: 3,
+  circuit_breaker: [failure_threshold: 5],
+
+  # Req options — passed through
+  connect_timeout: 15_000,
+  receive_timeout: 30_000,
+  decode_body: false
+)
+```
+
+<Note>
+HTTPower does not automatically encode or decode JSON. Use Jason explicitly for the request body and decode the response body yourself. This is a difference from `Req.post!(url, json: params)`.
+
+```elixir
+# Encoding
+HTTPower.post(url,
+  body: Jason.encode!(params),
+  headers: %{"content-type" => "application/json"}
+)
+
+# Decoding
+{:ok, response} = HTTPower.get(url)
+data = Jason.decode!(response.body)
+```
+</Note>
+
+## Key differences from Req
+
+### Error handling
+
+<Tabs>
+  <Tab title="Req">
+    ```elixir
+    # Raises on error
+    response = Req.get!("https://api.example.com")
+
+    # Returns result tuple
+    {:ok, response} = Req.get("https://api.example.com")
+    ```
+  </Tab>
+  <Tab title="HTTPower">
+    ```elixir
+    # Always returns a result tuple — never raises
+    {:ok, response} = HTTPower.get("https://api.example.com")
+    {:error, error} = HTTPower.get("https://unreachable.com")
+    ```
+  </Tab>
+</Tabs>
+
+### Retry behavior
+
+| | Req | HTTPower |
+|---|---|---|
+| Default | `retry: :transient` (3 attempts) | `max_retries: 3` with exponential backoff + jitter |
+| Configuration | `:transient`, `:safe_transient`, custom function | `max_retries`, `base_delay`, `max_delay`, `jitter_factor` |
+| Retryable status codes | Configurable | 408, 429, 500, 502, 503, 504 |
+| Retryable errors | Configurable | `:timeout`, `:closed`, `:econnrefused`, `:econnreset` (if `retry_safe: true`) |
+
+## Migration patterns
+
+<AccordionGroup>
+  <Accordion title="Gradual module-by-module">
+    Keep non-critical modules on Req while migrating external-facing calls to HTTPower:
+
+    ```elixir
+    # Still on Req — internal, non-critical
+    defmodule MyApp.InternalClient do
+      def fetch_config do
+        Req.get!("http://config-service/settings")
+      end
+    end
+
+    # Migrated to HTTPower — external, production-critical
+    defmodule MyApp.ExternalApiClient do
+      def fetch_data do
+        HTTPower.get("https://external-api.com/data")
+      end
+    end
+    ```
+  </Accordion>
+
+  <Accordion title="Feature flag rollout">
+    Use a feature flag for incremental rollout:
+
+    ```elixir
+    defmodule MyApp.ApiClient do
+      def fetch_users do
+        if Application.get_env(:myapp, :use_httpower, false) do
+          HTTPower.get("https://api.example.com/users")
+        else
+          {:ok, Req.get!("https://api.example.com/users")}
+        end
+      end
+    end
+    ```
+  </Accordion>
+
+  <Accordion title="Wrapper for critical paths">
+    Wrap only the calls that most benefit from a circuit breaker:
+
+    ```elixir
+    defmodule MyApp.PaymentClient do
+      # Critical path — HTTPower with circuit breaker
+      def charge_customer(amount) do
+        client = HTTPower.new(
+          base_url: "https://api.stripe.com",
+          circuit_breaker: [failure_threshold: 3]
+        )
+
+        HTTPower.post(client, "/v1/charges", body: Jason.encode!(amount))
+      end
+
+      # Non-critical — still using Req
+      def list_products do
+        Req.get!("https://api.stripe.com/v1/products")
+      end
+    end
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Recommended configs by scenario
+
+<CodeGroup>
+
+```elixir API client with retries
+defmodule MyApp.ApiClient do
+  def client do
+    HTTPower.new(
+      base_url: "https://api.example.com",
+      headers: %{"authorization" => "Bearer #{token()}"},
+      max_retries: 5,
+      timeout: 30,
+      retry: false
+    )
+  end
+
+  def fetch_data, do: HTTPower.get(client(), "/data")
+
+  defp token, do: Application.fetch_env!(:myapp, :api_token)
+end
+```
+
+```elixir High-volume with rate limiting
+config :httpower,
+  rate_limit: [
+    enabled: true,
+    requests: 1000,
+    per: :minute,
+    strategy: :wait,
+    max_wait_time: 5000
+  ]
+
+defmodule MyApp.HighVolumeClient do
+  def process_batch(items) do
+    Enum.map(items, fn item ->
+      HTTPower.post("https://api.example.com/process", body: item)
+    end)
+  end
+end
+```
+
+```elixir Payment processing
+config :httpower,
+  circuit_breaker: [
+    enabled: true,
+    failure_threshold: 3,
+    timeout: 30_000
+  ],
+  logging: [
+    enabled: true,
+    sanitize_body_fields: ["card_number", "cvv"]
+  ]
+
+defmodule MyApp.PaymentClient do
+  def charge(amount) do
+    case HTTPower.post("https://api.stripe.com/v1/charges", body: Jason.encode!(amount)) do
+      {:ok, response} -> {:ok, response}
+      {:error, %{reason: :service_unavailable}} -> {:error, :service_unavailable}
+      {:error, error} -> {:error, error}
+    end
+  end
+end
+```
+
+</CodeGroup>
+
+<CardGroup cols={2}>
+  <Card title="Production deployment" icon="server" href="/guides/production-deployment">
+    Checklist and best practices for running HTTPower in production.
+  </Card>
+  <Card title="Configuration reference" icon="sliders" href="/configuration/overview">
+    Complete reference for all HTTPower options.
+  </Card>
+</CardGroup>

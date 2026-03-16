@@ -1,0 +1,371 @@
+---
+title: "Configuration overview"
+description: "Three-level configuration with clear precedence: per-request > per-client > global."
+---
+
+HTTPower supports three levels of configuration. More specific configuration always wins over less specific.
+
+```
+Per-request  >  Per-client  >  Global
+(highest)                    (lowest)
+```
+
+## Configuration levels
+
+**Global configuration** is set in `config/config.exs` and applies to every request made by HTTPower in your application. Use this for application-wide defaults.
+
+**Per-client configuration** is set when creating a client with `HTTPower.new/1`. Use this to group requests to a specific API with shared settings like a base URL, auth headers, or tailored retry behavior.
+
+**Per-request configuration** is passed directly to `HTTPower.get/2`, `HTTPower.post/3`, and other request functions. It overrides both global and per-client settings for that single call.
+
+<Note>
+Headers are the exception: they are **merged** across all three levels rather than overridden. See [Header merging](#header-merging) below.
+</Note>
+
+## Configuration availability matrix
+
+Not all options are supported at every level.
+
+### Adapter and testing
+
+| Option | Global | Per-client | Per-request | Notes |
+|--------|:------:|:----------:|:-----------:|-------|
+| `adapter` | ✅ | ✅ | ✅ | |
+| `test_mode` | ✅ | — | — | Global only |
+
+### Retry
+
+| Option | Global | Per-client | Per-request | Notes |
+|--------|:------:|:----------:|:-----------:|-------|
+| `max_retries` | ✅ | ✅ | ✅ | |
+| `retry_safe` | ✅ | ✅ | ✅ | |
+| `base_delay` | ✅ | ✅ | ✅ | |
+| `max_delay` | ✅ | ✅ | ✅ | |
+| `jitter_factor` | ✅ | ✅ | ✅ | |
+
+### Rate limiting
+
+| Option | Global | Per-client | Per-request | Notes |
+|--------|:------:|:----------:|:-----------:|-------|
+| `rate_limit` | ✅ | ✅ | ✅ | |
+| `rate_limit_key` | — | ✅ | ✅ | |
+
+### Circuit breaker
+
+| Option | Global | Per-client | Per-request | Notes |
+|--------|:------:|:----------:|:-----------:|-------|
+| `circuit_breaker` | ✅ | ✅ | ✅ | |
+| `circuit_breaker_key` | — | ✅ | ✅ | |
+
+### Logging
+
+| Option | Global | Per-client | Per-request | Notes |
+|--------|:------:|:----------:|:-----------:|-------|
+| `logging` | ✅ | ✅ | ✅ | |
+
+### Request options
+
+| Option | Global | Per-client | Per-request | Notes |
+|--------|:------:|:----------:|:-----------:|-------|
+| `base_url` | — | ✅ | — | Per-client only |
+| `headers` | — | ✅ | ✅ | Merged across levels |
+| `body` | — | — | ✅ | Per-request only |
+| `timeout` | — | ✅ | ✅ | |
+| `ssl_verify` | — | ✅ | ✅ | |
+| `proxy` | — | ✅ | ✅ | |
+
+## Global configuration
+
+Set in `config/config.exs` (or environment-specific files). All options are optional — HTTPower uses sensible defaults when they are not set.
+
+```elixir config/config.exs
+config :httpower,
+  # Adapter (auto-detects if not specified: Finch → Req → Tesla)
+  adapter: HTTPower.Adapter.Finch,
+
+  # Retry
+  max_retries: 3,
+  retry_safe: false,
+  base_delay: 1000,
+  max_delay: 30_000,
+  jitter_factor: 0.2,
+
+  # Rate limiting
+  rate_limit: [
+    enabled: false,
+    requests: 100,
+    per: :minute,
+    strategy: :wait,
+    max_wait_time: 5000
+  ],
+
+  # Circuit breaker
+  circuit_breaker: [
+    enabled: false,
+    failure_threshold: 5,
+    failure_threshold_percentage: nil,
+    window_size: 10,
+    timeout: 60_000,
+    half_open_requests: 1
+  ],
+
+  # Logging (enable by calling HTTPower.Logger.attach() in application.ex)
+  logging: [
+    level: :info,
+    log_headers: true,
+    log_body: true,
+    sanitize_headers: [],
+    sanitize_body_fields: []
+  ],
+
+  # Test mode
+  test_mode: false
+```
+
+## Per-client configuration
+
+Create a reusable client with `HTTPower.new/1`. The client carries its settings into every request made through it.
+
+```elixir
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  headers: %{"authorization" => "Bearer #{token}"},
+  timeout: 30,
+  max_retries: 5,
+  circuit_breaker: [enabled: true, failure_threshold: 3],
+  rate_limit: [enabled: true, requests: 100, per: :minute]
+)
+
+HTTPower.get(client, "/users")
+HTTPower.post(client, "/users", body: data)
+```
+
+## Per-request configuration
+
+Pass options directly to any request function. These take the highest priority and affect only that call.
+
+```elixir
+# Override timeout for a slow endpoint
+HTTPower.get(client, "/reports/export", timeout: 120)
+
+# Use a custom circuit breaker key
+HTTPower.get(url,
+  circuit_breaker: [failure_threshold: 3, timeout: 30_000],
+  circuit_breaker_key: "payment_api"
+)
+
+# Short-circuit rate limiting for a specific request
+HTTPower.get(url,
+  rate_limit: [requests: 10, per: :second],
+  rate_limit_key: "search_endpoint"
+)
+```
+
+## Environment-specific configuration
+
+<Tabs>
+  <Tab title="Development">
+    ```elixir config/dev.exs
+    config :httpower,
+      logging: [enabled: true, level: :debug],
+      circuit_breaker: [enabled: false],
+      rate_limit: [enabled: false]
+    ```
+  </Tab>
+  <Tab title="Test">
+    ```elixir config/test.exs
+    config :httpower,
+      test_mode: true,
+      logging: [enabled: false],
+      circuit_breaker: [enabled: false],
+      rate_limit: [enabled: false]
+    ```
+  </Tab>
+  <Tab title="Production">
+    ```elixir config/prod.exs
+    config :httpower,
+      max_retries: 3,
+      circuit_breaker: [
+        enabled: true,
+        failure_threshold: 5,
+        timeout: 60_000
+      ],
+      rate_limit: [
+        enabled: true,
+        requests: 100,
+        per: :minute,
+        strategy: :wait
+      ],
+      logging: [
+        enabled: true,
+        level: :info,
+        sanitize_headers: ["authorization", "api-key"],
+        sanitize_body_fields: ["password", "credit_card", "cvv"]
+      ]
+    ```
+  </Tab>
+</Tabs>
+
+## Header merging
+
+Unlike other options, headers are merged additively across all three levels. A header set at a lower level is not lost when a higher level also sets headers — unless both levels set the same header name, in which case the higher-priority value wins.
+
+```elixir
+# Global config sets a user-agent
+config :httpower, headers: %{"user-agent" => "HTTPower/1.0"}
+
+# Per-client adds an authorization header
+client = HTTPower.new(headers: %{"authorization" => "Bearer token"})
+
+# Per-request adds a request ID
+HTTPower.get(client, "/api", headers: %{"x-request-id" => "123"})
+
+# Final headers sent on the wire:
+# {
+#   "user-agent"     => "HTTPower/1.0",
+#   "authorization"  => "Bearer token",
+#   "x-request-id"  => "123"
+# }
+```
+
+## Option reference
+
+### Adapter
+
+<ParamField path="adapter" type="module() | {module(), term()}">
+  The HTTP adapter to use. Defaults to auto-detection in order: Finch → Req → Tesla. Can be set globally or overridden per-client or per-request.
+
+  ```elixir
+  config :httpower, adapter: HTTPower.Adapter.Finch
+  # or with a pre-configured Tesla client
+  HTTPower.new(adapter: {HTTPower.Adapter.Tesla, tesla_client})
+  ```
+</ParamField>
+
+<ParamField path="test_mode" type="boolean" default="false">
+  When `true`, blocks all real HTTP requests and returns `{:error, %HTTPower.Error{reason: :network_blocked}}` unless the request is intercepted by `HTTPower.Test`. Global only — cannot be set per-client or per-request.
+</ParamField>
+
+### Retry
+
+<ParamField path="max_retries" type="non_neg_integer()" default="3">
+  Maximum number of retry attempts. Set to `0` to disable retries entirely.
+</ParamField>
+
+<ParamField path="retry_safe" type="boolean" default="false">
+  When `true`, also retries on `econnreset` (connection reset by peer). Only enable for idempotent operations.
+</ParamField>
+
+<ParamField path="base_delay" type="non_neg_integer()" default="1000">
+  Base delay in milliseconds for exponential backoff. The actual delay for attempt `n` is `base_delay * 2^(n-1)`, capped at `max_delay`.
+</ParamField>
+
+<ParamField path="max_delay" type="non_neg_integer()" default="30000">
+  Maximum delay cap in milliseconds for exponential backoff.
+</ParamField>
+
+<ParamField path="jitter_factor" type="float()" default="0.2">
+  Randomization factor between `0.0` and `1.0` to prevent thundering herd. Actual delay is multiplied by `(1 - jitter_factor * random())`.
+</ParamField>
+
+HTTPower retries on HTTP status codes `408`, `429`, `500`, `502`, `503`, `504` and on errors `:timeout`, `:closed`, `:econnrefused`, and `:econnreset` (when `retry_safe: true`).
+
+### Rate limiting
+
+<ParamField path="rate_limit.enabled" type="boolean" default="false">
+  Enable or disable rate limiting.
+</ParamField>
+
+<ParamField path="rate_limit.requests" type="pos_integer()" default="100">
+  Maximum number of requests allowed in the time window.
+</ParamField>
+
+<ParamField path="rate_limit.per" type=":second | :minute | :hour" default=":minute">
+  The time window duration.
+</ParamField>
+
+<ParamField path="rate_limit.strategy" type=":wait | :error" default=":wait">
+  How to handle requests when the rate limit is exceeded.
+  - `:wait` — block until tokens are available (up to `max_wait_time`)
+  - `:error` — return `{:error, :too_many_requests}` immediately
+</ParamField>
+
+<ParamField path="rate_limit.max_wait_time" type="non_neg_integer()" default="5000">
+  Maximum time in milliseconds to wait for a rate limit token when using the `:wait` strategy.
+</ParamField>
+
+### Circuit breaker
+
+<ParamField path="circuit_breaker.enabled" type="boolean" default="false">
+  Enable or disable the circuit breaker.
+</ParamField>
+
+<ParamField path="circuit_breaker.failure_threshold" type="pos_integer()" default="5">
+  Number of failures within the sliding window before the circuit opens.
+</ParamField>
+
+<ParamField path="circuit_breaker.failure_threshold_percentage" type="float() | nil" default="nil">
+  Alternative to `failure_threshold`. Opens the circuit when the failure rate exceeds this percentage. Requires at least `window_size` requests before triggering. Set to `nil` to use the absolute threshold instead.
+</ParamField>
+
+<ParamField path="circuit_breaker.window_size" type="pos_integer()" default="10">
+  Number of recent requests to track in the sliding window.
+</ParamField>
+
+<ParamField path="circuit_breaker.timeout" type="pos_integer()" default="60000">
+  How long in milliseconds the circuit stays open before transitioning to half-open.
+</ParamField>
+
+<ParamField path="circuit_breaker.half_open_requests" type="pos_integer()" default="1">
+  Number of test requests allowed through in the half-open state. All must succeed to close the circuit.
+</ParamField>
+
+### Logging
+
+<ParamField path="logging.level" type=":debug | :info | :warning | :error" default=":info">
+  Log level for HTTP request and response entries.
+</ParamField>
+
+<ParamField path="logging.log_headers" type="boolean" default="true">
+  Include request and response headers in log output. Sensitive headers are automatically redacted.
+</ParamField>
+
+<ParamField path="logging.log_body" type="boolean" default="true">
+  Include request and response bodies in log output. Sensitive fields are automatically redacted.
+</ParamField>
+
+<ParamField path="logging.sanitize_headers" type="list(String.t())" default="[]">
+  Additional header names to redact from logs. Additive — these supplement the built-in defaults (`authorization`, `api-key`, `x-api-key`, `token`, `cookie`, `secret`).
+</ParamField>
+
+<ParamField path="logging.sanitize_body_fields" type="list(String.t())" default="[]">
+  Additional body field names to redact from logs. Additive — these supplement the built-in defaults (`password`, `credit_card`, `cvv`, `card_number`, `api_key`, `token`, `ssn`).
+</ParamField>
+
+### Request options
+
+<ParamField path="timeout" type="pos_integer()" default="60">
+  Request timeout in seconds.
+</ParamField>
+
+<ParamField path="headers" type="map()" default="%{}">
+  HTTP headers. Merged across all configuration levels rather than overridden.
+</ParamField>
+
+<ParamField path="body" type="String.t() | binary()">
+  Request body for `POST`, `PUT`, and `PATCH` requests. Per-request only.
+</ParamField>
+
+<ParamField path="ssl_verify" type="boolean" default="true">
+  Enable SSL certificate verification.
+
+  <Warning>Setting `ssl_verify: false` disables certificate checking. Do not use in production.</Warning>
+</ParamField>
+
+<ParamField path="proxy" type=":system | keyword()" default=":system">
+  Proxy configuration. `:system` reads from system environment variables (`HTTP_PROXY`, `HTTPS_PROXY`). Pass a keyword list to configure explicitly:
+
+  ```elixir
+  proxy: [host: "proxy.example.com", port: 8080]
+  ```
+</ParamField>

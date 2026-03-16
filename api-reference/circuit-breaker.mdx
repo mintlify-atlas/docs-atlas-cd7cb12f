@@ -1,0 +1,193 @@
+---
+title: 'HTTPower.Middleware.CircuitBreaker'
+description: 'Manual circuit breaker control and state inspection.'
+---
+
+The `HTTPower.Middleware.CircuitBreaker` module implements the circuit breaker pattern to protect against cascading failures. In addition to the automatic failure-tracking behavior driven by the request pipeline, it exposes functions for manual state control and inspection.
+
+<Note>
+The circuit breaker operates as a `GenServer` backed by an ETS table. It must be started in your supervision tree before any of these functions are called.
+</Note>
+
+## States
+
+| State | Description |
+|-------|-------------|
+| `:closed` | Normal operation. Requests pass through; failures are tracked. |
+| `:open` | Requests fail immediately with `:service_unavailable`. |
+| `:half_open` | A limited number of test requests are allowed through to check recovery. |
+
+## Functions
+
+### `get_state/1`
+
+Returns the current state of a circuit, or `nil` if the circuit has never been used.
+
+```elixir
+@spec get_state(circuit_key :: String.t()) :: :closed | :open | :half_open | nil
+```
+
+<ParamField path="circuit_key" type="string" required>
+  The key identifying the circuit. Typically a hostname (e.g. `"api.example.com"`) or a custom string set via `circuit_breaker_key`.
+</ParamField>
+
+**Returns** `:closed`, `:open`, `:half_open`, or `nil` if the circuit has no recorded state.
+
+<CodeGroup>
+
+```elixir basic usage
+state = HTTPower.Middleware.CircuitBreaker.get_state("api.stripe.com")
+# => :closed
+```
+
+```elixir pattern match on state
+case HTTPower.Middleware.CircuitBreaker.get_state("api.stripe.com") do
+  :closed    -> IO.puts("Circuit healthy")
+  :open      -> IO.puts("Circuit open — skipping call")
+  :half_open -> IO.puts("Circuit recovering")
+  nil        -> IO.puts("No circuit state recorded yet")
+end
+```
+
+</CodeGroup>
+
+---
+
+### `open_circuit/1`
+
+Manually forces a circuit into the `:open` state, causing all subsequent requests to fail immediately without contacting the upstream service.
+
+```elixir
+@spec open_circuit(circuit_key :: String.t()) :: :ok
+```
+
+<ParamField path="circuit_key" type="string" required>
+  The key identifying the circuit to open.
+</ParamField>
+
+**Returns** `:ok`.
+
+<Tip>
+Useful during deployments or maintenance windows to proactively stop traffic to a dependency before it starts failing.
+</Tip>
+
+```elixir
+:ok = HTTPower.Middleware.CircuitBreaker.open_circuit("payment-gateway")
+
+# Subsequent requests to this circuit key now fail immediately
+{:error, %HTTPower.Error{reason: :service_unavailable}} =
+  HTTPower.get("https://payment-gateway/charge",
+    circuit_breaker_key: "payment-gateway"
+  )
+```
+
+---
+
+### `close_circuit/1`
+
+Manually forces a circuit into the `:closed` state, clearing the request history and resetting all counters. Traffic will flow normally after this call.
+
+```elixir
+@spec close_circuit(circuit_key :: String.t()) :: :ok
+```
+
+<ParamField path="circuit_key" type="string" required>
+  The key identifying the circuit to close.
+</ParamField>
+
+**Returns** `:ok`.
+
+```elixir
+# Re-enable traffic after a maintenance window
+:ok = HTTPower.Middleware.CircuitBreaker.close_circuit("payment-gateway")
+
+# Verify the state
+:closed = HTTPower.Middleware.CircuitBreaker.get_state("payment-gateway")
+```
+
+---
+
+### `reset_circuit/1`
+
+Completely removes all recorded state for a circuit from the ETS table. The next request to this circuit key will start fresh, as if the circuit had never been used.
+
+```elixir
+@spec reset_circuit(circuit_key :: String.t()) :: :ok
+```
+
+<ParamField path="circuit_key" type="string" required>
+  The key identifying the circuit to reset.
+</ParamField>
+
+**Returns** `:ok`.
+
+<Note>
+Unlike `close_circuit/1`, which transitions the circuit to `:closed` while preserving the struct, `reset_circuit/1` deletes the ETS entry entirely. The next `get_state/1` call will return `nil`.
+</Note>
+
+```elixir
+:ok = HTTPower.Middleware.CircuitBreaker.reset_circuit("api.example.com")
+
+nil = HTTPower.Middleware.CircuitBreaker.get_state("api.example.com")
+```
+
+---
+
+## Configuration
+
+Configure the circuit breaker globally in `config/config.exs` or per client:
+
+<CodeGroup>
+
+```elixir global config
+config :httpower, :circuit_breaker,
+  enabled: true,
+  failure_threshold: 5,
+  failure_threshold_percentage: 50,
+  window_size: 10,
+  timeout: 60_000,
+  half_open_requests: 1
+```
+
+```elixir per-client config
+client = HTTPower.new(
+  base_url: "https://api.example.com",
+  circuit_breaker: [
+    failure_threshold: 3,
+    timeout: 30_000
+  ]
+)
+```
+
+```elixir per-request circuit key
+HTTPower.get(url, circuit_breaker_key: "payment_api")
+```
+
+</CodeGroup>
+
+## Testing
+
+```elixir
+defmodule MyApp.CircuitBreakerTest do
+  use ExUnit.Case
+
+  test "manual circuit control" do
+    key = "test-circuit-#{System.unique_integer()}"
+
+    # Initially no state
+    assert HTTPower.Middleware.CircuitBreaker.get_state(key) == nil
+
+    # Open it
+    :ok = HTTPower.Middleware.CircuitBreaker.open_circuit(key)
+    assert HTTPower.Middleware.CircuitBreaker.get_state(key) == :open
+
+    # Close it
+    :ok = HTTPower.Middleware.CircuitBreaker.close_circuit(key)
+    assert HTTPower.Middleware.CircuitBreaker.get_state(key) == :closed
+
+    # Reset it
+    :ok = HTTPower.Middleware.CircuitBreaker.reset_circuit(key)
+    assert HTTPower.Middleware.CircuitBreaker.get_state(key) == nil
+  end
+end
+```
